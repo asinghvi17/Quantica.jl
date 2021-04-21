@@ -190,6 +190,19 @@ end
 chop(x::T, x0 = one(T)) where {T<:Real} = ifelse(abs(x) < √eps(T(x0)), zero(T), x)
 chop(x::C, x0 = one(R)) where {R<:Real,C<:Complex{R}} = chop(real(x), x0) + im*chop(imag(x), x0)
 
+function chop!(A::AbstractArray{T}, atol = default_tol(T)) where {T}
+    for (i, a) in enumerate(A)
+        if abs(a) < atol
+            A[i] = zero(T)
+        elseif abs(a) > 1/atol || isnan(a)
+            A[i] = T(Inf)
+        end
+    end
+    return A
+end
+
+default_tol(::Type{T}) where {T} = sqrt(eps(real(T)))
+
 function unique_sorted_approx!(v::AbstractVector{T}) where {T}
     i = 1
     xprev = first(v)
@@ -213,6 +226,10 @@ function normalize_columns!(kmat::AbstractMatrix, cols)
     end
     return kmat
 end
+
+normalize_columns(s::SMatrix{L,0}) where {L} = s
+normalize_columns(s::SMatrix{0,L}) where {L} = s
+normalize_columns(s) = mapslices(v -> v/norm(v), s, dims = 1)
 
 eltypevec(::AbstractMatrix{T}) where {T<:Number} = T
 eltypevec(::AbstractMatrix{S}) where {N,T<:Number,S<:SMatrix{N,N,T}} = SVector{N,T}
