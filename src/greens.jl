@@ -165,9 +165,14 @@ end
 function Base.show(io::IO, g::GreensFunction{<:SingleShot1DGreensSolver})
     print(io, summary(g), "\n",
 "  Matrix size    : $(size(g.solver.h0, 1)) × $(size(g.solver.h0, 2))
-  Deflated size  : $(size(g.solver.Adense, 1)) × $(size(g.solver.Adense, 2))
+  Deflated size  : $(deflated_size_text(g))
   Element type   : $(displayelements(g.h))
   Boundaries     : $(g.boundaries)")
+end
+
+function deflated_size_text(g)
+    text = g.solver.atol <= 0 ? "No deflation" : "$(size(g.solver.Adense, 1)) × $(size(g.solver.Adense, 2))"
+    return text
 end
 
 Base.summary(g::GreensFunction{<:SingleShot1DGreensSolver}) =
