@@ -368,7 +368,7 @@ function (g::GreensFunction{<:SingleShot1DGreensSolver})(ω, cells; kw...)
     elseif is_at_surface(cells´, g)
         gω = surface_fastpath(g, ω, surface_side(cells´, g); kw...)
     elseif is_across_boundary(cells´, g)
-        gω = Matrix(zero(g.solver.h1))
+        gω = Matrix(zero(g.solver.h0))
     else # general form
         gω = g(ω, missing; kw...)(cells´)
     end
@@ -385,11 +385,13 @@ is_at_surface(cells, g) = false
 
 is_across_boundary((src, dst), g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
     sign(dist_to_boundary(src, g)) != sign(dist_to_boundary(src, g)) ||
-    dist_to_boundary(src, g) == dist_to_boundary(dst, g) == 0
+    dist_to_boundary(src, g) == 0 || dist_to_boundary(dst, g) == 0
 is_across_boundary(cells, g) = false
 
 dist_to_boundary(cell, g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
     only(cell) - only(g.boundaries)
+dist_to_boundary((src, dst)::Pair, g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
+    dist_to_boundary(src, g), dist_to_boundary(dst, g)
 
 surface_side((src, dst), g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
     sign(dist_to_boundary(src, g))
@@ -422,7 +424,8 @@ end
 
 # Infinite: G∞_{N}  = GVᴺ G∞_{0}
 function (g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Missing}})(ω, ::Missing)
-    luG∞⁻¹, GRh₊, GLh₋ = Gfactors(g.solver, ω)
+    G∞⁻¹, GRh₊, GLh₋ = Gfactors(g.solver, ω)
+    luG∞⁻¹ = lu(G∞⁻¹)
     return cells -> G_infinite(luG∞⁻¹, GRh₊, GLh₋, cells)
 end
 
@@ -436,16 +439,17 @@ end
 
 # Semiinifinite: G_{N,M} = (Ghᴺ⁻ᴹ - GhᴺGh⁻ᴹ)G∞_{0}
 function (g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}})(ω, ::Missing)
-    luG∞⁻¹, GRh₊, GLh₋ = Gfactors(g.solver, ω)
-    return cells -> G_semiinfinite(luG∞⁻¹, GRh₊, GLh₋, dist_to_boundary.(cells, Ref(g)))
+    G∞⁻¹, GRh₊, GLh₋ = Gfactors(g.solver, ω)
+    return cells -> G_semiinfinite(G∞⁻¹, GRh₊, GLh₋, dist_to_boundary.(cells, Ref(g)))
 end
 
-function G_semiinfinite!(gs::SingleShot1DGreensSolver, luG∞⁻¹, Gh₊, Gh₋, (N, M))
+function G_semiinfinite(G∞⁻¹, Gh₊, Gh₋, (N, M))
     Ghᴺ⁻ᴹ = Gh_power(Gh₊, Gh₋, N-M)
     Ghᴺ = Gh_power(Gh₊, Gh₋, N)
     Gh⁻ᴹ = Gh_power(Gh₊, Gh₋, -M)
     mul!(Ghᴺ⁻ᴹ, Ghᴺ, Gh⁻ᴹ, -1, 1) # (Ghᴺ⁻ᴹ - GhᴺGh⁻ᴹ)
-    G∞ = rdiv!(Ghᴺ⁻ᴹ , luG∞⁻¹)
+    # G∞ = rdiv!(Ghᴺ⁻ᴹ , luG∞⁻¹)  # This is not defined in Julia (v1.7) yet
+    G∞ = Ghᴺ⁻ᴹ / G∞⁻¹
     return G∞
 end
 
@@ -457,8 +461,7 @@ function Gfactors(solver::SingleShot1DGreensSolver, ω)
     GL⁻¹ = A1 - ΣL
     GLh₋ = GL⁻¹ \ Matrix(solver.hm)
     G∞⁻¹ = GL⁻¹ - ΣR
-    luG∞⁻¹ = lu(G∞⁻¹)
-    return luG∞⁻¹, GRh₊, GLh₋
+    return G∞⁻¹, GRh₊, GLh₋
 end
 
 Gh_power(Gh₊, Gh₋, N) = N == 0 ? one(Gh₊) : N > 0 ? Gh₊^N : Gh₋^-N
