@@ -187,19 +187,21 @@ function ispositive(ndist)
     return result
 end
 
-chop(x::T, x0 = one(T)) where {T<:Real} = ifelse(abs(x) < √eps(T(x0)), zero(T), x)
+chop(x::T, x0 = one(T)) where {T<:Real} = ifelse(abs2(x) < eps(T(x0)), zero(T), x)
 chop(x::C, x0 = one(R)) where {R<:Real,C<:Complex{R}} = chop(real(x), x0) + im*chop(imag(x), x0)
 
-function chop!(A::AbstractArray{T}, atol = default_tol(T)) where {T}
-    for (i, a) in enumerate(A)
-        if abs(a) < atol
-            A[i] = zero(T)
-        elseif abs(a) > 1/atol || isnan(a)
-            A[i] = T(Inf)
-        end
-    end
-    return A
-end
+# function chop!(A::AbstractArray{T}, atol = default_tol(T)) where {T}
+#     for (i, a) in enumerate(A)
+#         # if abs(a) < atol
+#         #     A[i] = zero(T)
+#         if !iszero(a) #&& (abs(real(a)) < atol || abs(imag(a)) < atol)
+#             A[i] = chop(a)
+#         elseif abs(a) > 1/atol || isnan(a)
+#             A[i] = T(Inf)
+#         end
+#     end
+#     return A
+# end
 
 default_tol(::Type{T}) where {T} = sqrt(eps(real(T)))
 
