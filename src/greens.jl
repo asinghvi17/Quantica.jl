@@ -98,7 +98,7 @@ Base.eltype(g::GreensFunction) = eltype(g.h)
 #######################################################################
 # SingleShot1DGreensSolver
 #######################################################################
-using QuadEig: Linearization
+using QuadEig: Linearization, pqr, getQ, getQ´, getRP´, getPR´, nonzero_rows
 
 """
     SingleShot1D(; direct = false)
@@ -220,8 +220,8 @@ function Deflator(atol::Real, A0, A1, A2)
     lin   = linearize(A2, A1, A0; atol)
     Aω0    = copy(lin.A)                       # store the ω=0 matrix A to be able to update l
     QIV    = lin.Q * [I(n) 0I; 0I 0I] * lin.V  # We shift Aω0 before deflating by -ω*QIV to turn h0 into h0 - ω
-    R      = Matrix(last(nullspace_decomposition(A0, atol)))
-    L      = Matrix(last(nullspace_decomposition(A2, atol)))
+    R      = Matrix(rowspace_qr(A0, atol))     # orthogonal complement of nullspace(A0)
+    L      = Matrix(rowspace_qr(A2, atol))     # orthogonal complement of nullspace(A2)
     hLR    = -L'*A0*R
     hRL    = -R'*A2*L
     r = size(R, 2)
@@ -248,15 +248,26 @@ function shiftω!(d::Deflator, ω)
     return d
 end
 
-function nullspace_decomposition(mat, atol)
-    q´ = QuadEig.pqr(copy(mat'))
-    basis = QuadEig.getQ(q´)
-    RP´ = QuadEig.getRP´(q´)
-    r = QuadEig.nonzero_rows(RP´, atol)
+function orthobasis_decomposition_qr(mat, atol)
+    q = pqr(mat)
+    basis = getQ(q)
+    RP´ = getRP´(q)
     n = size(basis, 2)
-    complement, kernel = view(basis, :, 1:r), view(basis, :, r+1:n)
-    return kernel, complement
+    r = nonzero_rows(RP´, atol)
+    orthobasis = view(basis, :, 1:r)
+    complement = view(basis, :, r+1:n)
+    r = view(RP´, 1:r, :)
+    return orthobasis, r, complement
 end
+
+function fullrank_decomposition_qr(mat, atol)
+    rowspace, r, nullspace = orthobasis_decomposition_qr(mat', atol)
+    return rowspace, r', nullspace
+end
+
+nullspace_qr(mat, atol) = last(fullrank_decomposition_qr(mat, atol))
+
+rowspace_qr(mat, atol) = first(fullrank_decomposition_qr(mat, atol))
 
 ## Solver execution: compute self-energy, with or without deflation
 (s::SingleShot1DGreensSolver)(ω) = s(ω, Val{:R})
@@ -265,7 +276,9 @@ function (s::SingleShot1DGreensSolver{Missing})(ω, which)
     A = Matrix([ω*I - s.h0 -s.hp; -I 0I])
     B = Matrix([s.hm 0I; 0I -I])
     sch = schur(A, B)
-    return nondeflated_selfenergy(which, s, sch)
+    Σ = nondeflated_selfenergy(which, s, sch)
+    @show sum(abs.(Σ - s.hm * ((ω*I - s.h0 - Σ) \ Matrix(s.hp))))
+    return Σ
 end
 
 function nondeflated_selfenergy(::Type{Val{:R}}, s, sch)
@@ -311,19 +324,45 @@ function deflated_selfenergy(deflator::Deflator{T,M}, s::SingleShot1DGreensSolve
     rmodes = deflator.atol .< abs.(sch.α ./ sch.β) .< 1
     nr = sum(rmodes)
     ordschur!(sch, rmodes)
+    # @show abs.(sch.α ./ sch.β)[1:nr]
+    R = deflator.R
     Z11 = V1 * view(sch.Z, :, 1:nr)
     Z21 = V2 * view(sch.Z, :, 1:nr)
 
-    # find generalized eigenvectors
-    φs, h₋Jφs = jordan_chain(ω*I - s.h0, deflator)
-    source = [Z11 φs]
-    target = [Z21 h₋Jφs]
-    R = deflator.R
+    # add generalized eigenvectors until we span the full R space
+    R´source, target = add_jordan_chain(deflator, ω*I - s.h0, R'Z11, Z21)
 
-    ΣR = M(target * ((R' * source) \ R'))
-    # @show sum(abs.(ΣR - s.hm * ((ω*I - s.h0 - ΣR) \ Matrix(s.hp))))
+    ΣR = M(target * (R´source \ R'))
+
+    # @show size(R´source), cond(R´source)
+    @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
 
     return ΣR
+end
+
+function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
+    local ΣRR, R´φg_candidates, source_rowspace
+    g0⁻¹ = integrate_out_bulk(A1, d)
+    h₊, h₋ = d.hLR, d.hRL
+    iL, iR = idsLR(d)
+    G0 = inv(g0⁻¹)
+    GLL = view(G0, iL, iL)
+    GRLh₊ = view(G0, iR, iL)*h₊
+    R´source = similar(R´Z11, size(R´Z11, 1), 0)
+    while true
+        # when R´source is square, it will be full rank and invertible. Exit after computing last ΣRR
+        # recursive Green function iteration to build GLL and GRL*h₊
+        ΣRR = h₋*GLL*h₊
+        size(R´source, 1) == size(R´source, 2) && break
+        G0 = inv(g0⁻¹ - [0I 0I; 0I ΣRR])
+        GLL = view(G0, iL, iL)
+        GRLh₊ = GRLh₊ * view(G0, iR, iL)
+        R´φg_candidates = nullspace_qr(GRLh₊, d.atol)
+        source_rowspace, R´source, _ = fullrank_decomposition_qr([R´Z11 R´φg_candidates], d.atol)
+    end
+    φgJ_candidates = d.R * ΣRR * R´φg_candidates
+    target = [Z21 φgJ_candidates] * source_rowspace
+    return R´source, target
 end
 
 function integrate_out_bulk(A1, deflator)
@@ -334,30 +373,6 @@ function integrate_out_bulk(A1, deflator)
     return g0⁻¹
 end
 
-function jordan_chain(A1, d::Deflator)
-    local ΣRR
-    g0⁻¹ = integrate_out_bulk(A1, d)
-    h₊, h₋ = d.hRL, d.hLR
-    iL, iR = idsLR(d)
-    G0 = inv(g0⁻¹)
-    GLL = view(G0, iL, iL)
-    GRLh₊ = view(G0, iR, iL)*h₊
-    ns, _ = nullspace_decomposition(GRLh₊, d.atol)
-    nullity = size(ns, 2)
-    while true
-        ΣRR = h₋*GLL*h₊
-        G0 = inv(g0⁻¹ - [0I 0I; 0I ΣRR])
-        GLL = view(G0, iL, iL)
-        GRLh₊ = GRLh₊ * view(G0, iR, iL)
-        ns, _ = nullspace_decomposition(GRLh₊, d.atol)
-        nullity == size(ns, 2) && break
-        nullity = size(ns, 2)
-    end
-    φs = d.R * ns
-    h₋Jφs = d.R * ΣRR * ns
-    return φs, h₋Jφs
-end
-
 ### Greens execution
 
 # Choose codepath
@@ -365,10 +380,10 @@ function (g::GreensFunction{<:SingleShot1DGreensSolver})(ω, cells; kw...)
     cells´ = sanitize_cells(cells, g)
     if is_infinite_local(cells´, g)
         gω = local_fastpath(g, ω; kw...)
-    elseif is_at_surface(cells´, g)
-        gω = surface_fastpath(g, ω, surface_side(cells´, g); kw...)
     elseif is_across_boundary(cells´, g)
         gω = Matrix(zero(g.solver.h0))
+    elseif is_at_surface(cells´, g)
+        gω = surface_fastpath(g, ω, dist_to_boundary(cells´, g); kw...)
     else # general form
         gω = g(ω, missing; kw...)(cells´)
     end
@@ -380,7 +395,7 @@ is_infinite_local((src, dst), g::GreensFunction{<:SingleShot1DGreensSolver,1,Tup
 is_infinite_local(cells, g) = false
 
 is_at_surface((src, dst), g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
-    src == dst && abs(dist_to_boundary(src, g)) == 1
+    abs(dist_to_boundary(src, g)) == 1 || abs(dist_to_boundary(dst, g)) == 1
 is_at_surface(cells, g) = false
 
 is_across_boundary((src, dst), g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
@@ -393,16 +408,24 @@ dist_to_boundary(cell, g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}
 dist_to_boundary((src, dst)::Pair, g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
     dist_to_boundary(src, g), dist_to_boundary(dst, g)
 
-surface_side((src, dst), g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
-    sign(dist_to_boundary(src, g))
-
 ## Fast-paths
 
-# Surface semi-infinite: G_{1,1} = (ω*I - h0 - ΣR)⁻¹, G_{-1,-1} = (ω*I - h0 - ΣL)⁻¹
-function surface_fastpath(g, ω, side; source = all_sources(g))
-    Σ = side > 0 ? g.solver(ω, Val{:R}) : g.solver(ω, Val{:L})
+# Surface-bulk semi-infinite:
+# G_{1,1} = (ω*I - h0 - ΣR)⁻¹, G_{-1,-1} = (ω*I - h0 - ΣL)⁻¹
+# G_{N,1} = (G_{1,1}h₁)ᴺ⁻¹G_{1,1}, where G_{1,1} = (ω*I - h0 - ΣR)⁻¹
+# G_{-N,-1} = (G_{-1,-1}h₋₁)ᴺ⁻¹G_{-1,-1}, where G_{-1,-1} = (ω*I - h0 - ΣL)⁻¹
+function surface_fastpath(g, ω, (dsrc, ddst); source = all_sources(g))
+    dist = ddst - dsrc
+    Σ = dsrc > 0 ? g.solver(ω, Val{:R}) : g.solver(ω, Val{:L})
     h0 = g.solver.h0
-    G = ldiv!(lu(ω*I - h0 - Σ), source)
+    luG⁻¹ = lu(ω*I - h0 - Σ)
+    if dist == 0
+        G = ldiv!(luG⁻¹, source)
+    else
+        h = dist > 0 ? g.solver.hp : g.solver.hm
+        Gh = luG⁻¹ \ Matrix(h)
+        G = Gh^(abs(dist)-1) * ldiv!(luG⁻¹, source)
+    end
     return G
 end
 
