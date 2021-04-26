@@ -432,7 +432,7 @@ function surface_fastpath(g, ω, (dsrc, ddst); source = all_sources(g))
         G = ldiv!(luG⁻¹, source)
     else
         h = dist > 0 ? g.solver.hp : g.solver.hm
-        Gh = luG⁻¹ \ Matrix(h)
+        Gh = ldiv!(luG⁻¹, Matrix(h))
         G = Gh^(abs(dist)-1) * ldiv!(luG⁻¹, source)
     end
     return G
