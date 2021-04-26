@@ -225,9 +225,10 @@ function Deflator(atol::Real, A0, A1, A2)
     hLR    = -L'*A0*R
     hRL    = -R'*A2*L
     r = size(R, 2)
+    l = size(L, 2)
     T = eltype(Aω0)
-    Adense = Matrix{T}(undef, 2r, 2r)          # Needs to be dense for schur!(Aω, Bω)
-    Bdense = Matrix{T}(undef, 2r, 2r)
+    Adense = Matrix{T}(undef, r+l, r+l)       # Needs to be dense for schur!(Aω, Bω)
+    Bdense = Matrix{T}(undef, r+l, r+l)
     return Deflator(lin, Aω0, QIV, L, R, hLR, hRL, Adense, Bdense, atol)
 end
 
@@ -277,7 +278,7 @@ function (s::SingleShot1DGreensSolver{Missing})(ω, which)
     B = Matrix([s.hm 0I; 0I -I])
     sch = schur(A, B)
     Σ = nondeflated_selfenergy(which, s, sch)
-    @show sum(abs.(Σ - s.hm * ((ω*I - s.h0 - Σ) \ Matrix(s.hp))))
+    # @show sum(abs.(Σ - s.hm * ((ω*I - s.h0 - Σ) \ Matrix(s.hp))))
     return Σ
 end
 
@@ -313,7 +314,7 @@ nondeflated_selfenergy(::Type{Val{:RL}}, s, sch) =
 
 function deflated_selfenergy(deflator::Deflator{T,M}, s::SingleShot1DGreensSolver, ω) where {T,M}
     shiftω!(deflator, ω)
-    d = deflate(deflator.lin)
+    d = deflate(deflator.lin; atol = deflator.atol)
     A, B = get_C4_AB(d, deflator)
     n = size(d.V, 1) ÷ 2
     V1 = view(d.V, 1:n, :)
@@ -351,6 +352,7 @@ function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
     g0⁻¹ = integrate_out_bulk(A1, d)
     h₊, h₋ = d.hLR, d.hRL
     iL, iR = idsLR(d)
+    Σ = zero(g0⁻¹)
     G0 = inv(g0⁻¹)
     GLL = view(G0, iL, iL)
     GRLh₊ = view(G0, iR, iL)*h₊
@@ -360,9 +362,10 @@ function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
         # Exit after computing last ΣRR in the recursive Green function iteration of GLL and GRL*h₊
         ΣRR = h₋*GLL*h₊
         size(R´source, 1) == size(R´source, 2) && break
-        G0 = inv(g0⁻¹ - [0I 0I; 0I ΣRR])
+        copy!(view(Σ, iR, iR), ΣRR)
+        G0 = inv(g0⁻¹ - Σ)
         GLL = view(G0, iL, iL)
-        GRLh₊ = GRLh₊ * view(G0, iR, iL)
+        GRLh₊ = GRLh₊ * view(G0, iR, iL) * h₊
         R´φg_candidates = nullspace_qr(GRLh₊, d.atol)
         source_rowspace, R´source, _ = fullrank_decomposition_qr([R´Z11 R´φg_candidates], d.atol)
     end
