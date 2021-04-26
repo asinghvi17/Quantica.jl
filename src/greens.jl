@@ -357,7 +357,8 @@ function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
     GLL = view(G0, iL, iL)
     GRLh₊ = view(G0, iR, iL)*h₊
     R´source = similar(R´Z11, size(R´Z11, 1), 0)
-    while true
+    maxiter = 10
+    for n in 1:maxiter
         # when R´source is square, it will be full rank and invertible.
         # Exit after computing last ΣRR in the recursive Green function iteration of GLL and GRL*h₊
         ΣRR = h₋*GLL*h₊
@@ -471,6 +472,7 @@ end
 
 # Semiinifinite: G_{N,M} = (Ghᴺ⁻ᴹ - GhᴺGh⁻ᴹ)G∞_{0}
 function (g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}})(ω, ::Missing)
+    @show 1
     G∞⁻¹, GRh₊, GLh₋ = Gfactors(g.solver, ω)
     return cells -> G_semiinfinite(G∞⁻¹, GRh₊, GLh₋, dist_to_boundary.(cells, Ref(g)))
 end
