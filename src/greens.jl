@@ -153,7 +153,7 @@ end
 SingleShot1D(; atol = missing) = SingleShot1D(atol)
 
 struct Deflator{T,M,R<:Real}
-    lin::Linearization{T,M}
+    lin::Linearization{T,M,R}
     Aω0::M
     QIV::M
     L::Matrix{T}
@@ -321,7 +321,7 @@ function deflated_selfenergy(deflator::Deflator{T,M}, s::SingleShot1DGreensSolve
 
     # find right-moving eigenvectors with atol < |λ| < 1
     sch = schur!(A, B)
-    rmodes = deflator.atol .< abs.(sch.α ./ sch.β) .< 1
+    rmodes = retarded_modes(sch, deflator.atol)
     nr = sum(rmodes)
     ordschur!(sch, rmodes)
     R = deflator.R
@@ -337,6 +337,14 @@ function deflated_selfenergy(deflator::Deflator{T,M}, s::SingleShot1DGreensSolve
 
     return ΣR
 end
+
+# need this barrier for type-stability (sch.α and sch.β are finicky)
+function retarded_modes(sch, atol)
+    rmodes = Vector{Bool}(undef, length(sch.α))
+    rmodes .= atol .< abs.(sch.α ./ sch.β) .< 1
+    return rmodes
+end
+
 
 function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
     local ΣRR, R´φg_candidates, source_rowspace
@@ -360,7 +368,7 @@ function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
     end
     φgJ_candidates = d.R * ΣRR * R´φg_candidates
     target = [Z21 φgJ_candidates] * source_rowspace
-    return R´source, target
+    return copy(R´source), target
 end
 
 function integrate_out_bulk(A1, deflator)
