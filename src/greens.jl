@@ -324,18 +324,16 @@ function deflated_selfenergy(deflator::Deflator{T,M}, s::SingleShot1DGreensSolve
     rmodes = deflator.atol .< abs.(sch.α ./ sch.β) .< 1
     nr = sum(rmodes)
     ordschur!(sch, rmodes)
-    # @show abs.(sch.α ./ sch.β)[1:nr]
     R = deflator.R
     Z11 = V1 * view(sch.Z, :, 1:nr)
     Z21 = V2 * view(sch.Z, :, 1:nr)
-
     # add generalized eigenvectors until we span the full R space
     R´source, target = add_jordan_chain(deflator, ω*I - s.h0, R'Z11, Z21)
 
     ΣR = M(target * (R´source \ R'))
 
     # @show size(R´source), cond(R´source)
-    @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
+    # @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
 
     return ΣR
 end
@@ -350,8 +348,8 @@ function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
     GRLh₊ = view(G0, iR, iL)*h₊
     R´source = similar(R´Z11, size(R´Z11, 1), 0)
     while true
-        # when R´source is square, it will be full rank and invertible. Exit after computing last ΣRR
-        # recursive Green function iteration to build GLL and GRL*h₊
+        # when R´source is square, it will be full rank and invertible.
+        # Exit after computing last ΣRR in the recursive Green function iteration of GLL and GRL*h₊
         ΣRR = h₋*GLL*h₊
         size(R´source, 1) == size(R´source, 2) && break
         G0 = inv(g0⁻¹ - [0I 0I; 0I ΣRR])
