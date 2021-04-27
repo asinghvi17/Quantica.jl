@@ -352,13 +352,14 @@ function deflated_selfenergy(deflator::Deflator{T,M}, s::Schur1DGreensSolver, ω
     # h₋χ = h₋ * Q0 * [χR; χB] = h₋ * Q0 * Q2 * Zret * R11 = Z21 * R11, where Z21 = h₋ * Q0 * Q2 * Zret
     R´Z11 = Q1 * Zret
     Z21   = h₋Q0 * Q2 * Zret
+    # R´source, target = R´Z11, Z21
     # add generalized eigenvectors until we span the full R space
     R´source, target = add_jordan_chain(deflator, ω*I - s.h0, R´Z11, Z21)
 
     ΣR = M(target * (R´source \ R'))
 
-    # @show size(R´source), cond(R´source)
-    @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
+    # # @show size(R´source), cond(R´source)
+    # @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
 
     return ΣR
 end
