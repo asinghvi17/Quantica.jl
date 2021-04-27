@@ -17,7 +17,7 @@ the provided `solveobject`. Currently valid `solveobject`s are
 
 - the `Bandstructure` of `h` (for an unbounded `h` or an `Hamiltonian{<:Superlattice}}`)
 - the `Spectrum` of `h` (for a bounded `h`)
-- `SingleShot1D(; direct = false)` (single-shot generalized [or direct if `direct = true`] eigenvalue approach for 1D Hamiltonians)
+- `Schur1D(; direct = false)` (single-shot generalized [or direct if `direct = true`] eigenvalue approach for 1D Hamiltonians)
 
 If a `boundaries = (n₁, n₂, ...)` is provided, a reflecting boundary is assumed for each
 non-missing `nᵢ` perpendicular to Bravais vector `i` at a cell distance `nᵢ` from the
@@ -59,7 +59,7 @@ julia> m = similarmatrix(g); g(m, 0.2)
 ```
 
 # See also
-    `greens!`, `SingleShot1D`
+    `greens!`, `Schur1D`
 """
 greens(h::Hamiltonian{<:Any,L}, solverobject; boundaries = filltuple(missing, Val(L))) where {L} =
     GreensFunction(greensolver(solverobject, h), h, boundaries)
@@ -96,12 +96,11 @@ Base.size(g::GreensFunction, args...) = size(g.h, args...)
 Base.eltype(g::GreensFunction) = eltype(g.h)
 
 #######################################################################
-# SingleShot1DGreensSolver
+# Schur1DGreensSolver
 #######################################################################
-using QuadEig: Linearization, pqr, getQ, getQ´, getRP´, getPR´, nonzero_rows
 
 """
-    SingleShot1D(; direct = false)
+    Schur1D(; direct = false)
 
 Return a Greens function solver using the generalized eigenvalue approach, whereby given the
 energy `ω`, the eigenmodes of the infinite 1D Hamiltonian, and the corresponding infinite
@@ -132,8 +131,8 @@ julia> using LinearAlgebra
 
 julia> h = LP.honeycomb() |> hamiltonian(hopping(1)) |> unitcell((1,-1), (10,10)) |> Quantica.wrap(2);
 
-julia> g = greens(h, SingleShot1D(), boundaries = (0,))
-GreensFunction{SingleShot1DGreensSolver}: Green's function using the single-shot 1D method
+julia> g = greens(h, Schur1D(), boundaries = (0,))
+GreensFunction{Schur1DGreensSolver}: Green's function using the single-shot 1D method
   Matrix size    : 40 × 40
   Reduced size   : 20 × 20
   Element type   : scalar (ComplexF64)
@@ -146,26 +145,27 @@ julia> tr(g(0.3))
 # See also
     `greens`
 """
-struct SingleShot1D{R}
+struct Schur1D{R}
     atol::R  # could be missing for default_tol(T)
 end
 
-SingleShot1D(; atol = missing) = SingleShot1D(atol)
+Schur1D(; atol = missing) = Schur1D(atol)
 
-struct Deflator{T,M,R<:Real}
-    lin::Linearization{T,M,R}
-    Aω0::M
-    QIV::M
-    L::Matrix{T}
-    R::Matrix{T}
-    hLR::Matrix{T}
-    hRL::Matrix{T}
-    Adense::Matrix{T}
-    Bdense::Matrix{T}
-    atol::R
+struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S}
+    hmQ0::M             # h₋*Q0 where Q0 = [rowspace(A0) nullspace(A0)]. h₊ = [R' 0] Q0'. h₋ = Q0 [R; 0]
+    R::Matrix{T}        # A0 = [-hRR 0; -hBR  0] * [R'; B' ]. R = orthogonal complement of nullspace(A0) === rowspace(A0)
+    L::Matrix{T}        # A2 = [-hLL 0; -hB´L 0] * [L'; B´']. L = orthogonal complement of nullspace(A2) === rowspace(A2)
+    hLR::Matrix{T}      # hLR = L' h₊ R (dense for ldiv! in Jordan recursion)
+    Adef::Matrix{T}     # deflated A
+    Bdef::Matrix{T}     # deflated B
+    Ablock::Matrix{T}   # Adef = Ablock * QR; Ablock = [0 I 0; -hRR gRR⁻¹ gRB⁻¹]
+    Bblock::Matrix{T}   # Bdef = Bblock * QR; Bblock = [I 0 0; 0 hRR' hBR']
+    Vblock´::M          # Vblock = [-hBR gBR⁻¹ gBB⁻¹] = [R 0] [QB'; QR']. Vblock´ = sparse(Vblock')
+    ωshifterAV::S       # metadata to aid in ω-shifting the relevant A and V subblocks
+    atol::R             # A0, A2 deflation tolerance
 end
 
-struct SingleShot1DGreensSolver{D<:Union{Deflator,Missing},M} <: AbstractGreensSolver
+struct Schur1DGreensSolver{D<:Union{Deflator,Missing},M} <: AbstractGreensSolver
     h0::M
     hp::M
     hm::M
@@ -173,7 +173,7 @@ struct SingleShot1DGreensSolver{D<:Union{Deflator,Missing},M} <: AbstractGreensS
     deflatorL::D
 end
 
-function Base.show(io::IO, g::GreensFunction{<:SingleShot1DGreensSolver})
+function Base.show(io::IO, g::GreensFunction{<:Schur1DGreensSolver})
     print(io, summary(g), "\n",
 "  Matrix size    : $(size(g.solver.h0, 1)) × $(size(g.solver.h0, 2))
   Deflated size  : $(deflated_size_text(g))
@@ -187,66 +187,74 @@ function deflated_size_text(g::GreensFunction)
     return text
 end
 
-deflated_size_text(d::Deflator) = "$(size(d.Adense, 1)) × $(size(d.Adense, 2))"
+deflated_size_text(d::Deflator) = "$(size(d.Adef, 1)) × $(size(d.Adef, 2))"
 
-Base.summary(g::GreensFunction{<:SingleShot1DGreensSolver}) =
-    "GreensFunction{SingleShot1DGreensSolver}: Green's function using the single-shot 1D method"
+Base.summary(g::GreensFunction{<:Schur1DGreensSolver}) =
+    "GreensFunction{Schur1DGreensSolver}: Green's function using the Schur1D method"
 
-hasdeflator(::SingleShot1DGreensSolver{<:Deflator}) = true
-hasdeflator(::SingleShot1DGreensSolver{Missing}) = false
+hasdeflator(::Schur1DGreensSolver{<:Deflator}) = true
+hasdeflator(::Schur1DGreensSolver{Missing}) = false
 
-function greensolver(s::SingleShot1D, h)
-    latdim(h) == 1 || throw(ArgumentError("Cannot use a SingleShot1D Green function solver with an $(latdim(h))-dimensional Hamiltonian"))
+function greensolver(s::Schur1D, h)
+    latdim(h) == 1 || throw(ArgumentError("Cannot use a Schur1D Green function solver with an $(latdim(h))-dimensional Hamiltonian"))
     maxdn = max(1, maximum(har -> abs(first(har.dn)), h.harmonics))
     H = flatten(maxdn == 1 ? h : unitcell(h, (maxdn,)))
-    A0, A1, A2 = -H[(1,)], -H[(0,)], -H[(-1,)]
+    h₊, h₀, h₋ = H[(1,)], H[(0,)], H[(-1,)]
     n = size(H, 1)
     T = complex(blockeltype(H))
     atol = s.atol === missing ? default_tol(T) : s.atol
-    deflatorR = Deflator(atol, A0, A1, A2)
-    # For left-moving modes we really need another deflator with A0 ↔ A2 (since deflator uses C4, not C1)
-    deflatorL = Deflator(atol, A2, A1, A0)
-    h0     = H[(0,)]
-    hp     = H[(1,)]
-    hm     = H[(-1,)]
-    return SingleShot1DGreensSolver(h0, hp, hm, deflatorR, deflatorL)
+    deflatorR = Deflator(atol, h₊, h₀, h₋)
+    deflatorL = Deflator(atol, h₋, h₀, h₊)
+    return Schur1DGreensSolver(h₀, h₊, h₋, deflatorR, deflatorL)
 end
 
 Deflator(atol::Nothing, As...) = missing
 
-function Deflator(atol::Real, A0, A1, A2)
-    n = size(A1, 1)
-    # Fourth companion linearization C4(A0, A1, A2), built as the reverse (A↔B) of the deflated C2(A2, A1, A0)
-    lin   = linearize(A2, A1, A0; atol)
-    Aω0    = copy(lin.A)                       # store the ω=0 matrix A to be able to update l
-    QIV    = lin.Q * [I(n) 0I; 0I 0I] * lin.V  # We shift Aω0 before deflating by -ω*QIV to turn h0 into h0 - ω
-    R      = Matrix(rowspace_qr(A0, atol))     # orthogonal complement of nullspace(A0)
-    L      = Matrix(rowspace_qr(A2, atol))     # orthogonal complement of nullspace(A2)
-    hLR    = -L'*A0*R
-    hRL    = -R'*A2*L
-    r = size(R, 2)
-    l = size(L, 2)
-    T = eltype(Aω0)
-    Adense = Matrix{T}(undef, r+l, r+l)       # Needs to be dense for schur!(Aω, Bω)
-    Bdense = Matrix{T}(undef, r+l, r+l)
-    return Deflator(lin, Aω0, QIV, L, R, hLR, hRL, Adense, Bdense, atol)
+function Deflator(atol::Real, h₊::M, h₀::M, h₋::M) where {M}
+    rowspaceR, _, nullspaceR = fullrank_decomposition_qr(h₊, atol)
+    rowspaceL, _, _ = fullrank_decomposition_qr(h₋, atol)
+    B      = Matrix(nullspaceR)                      # nullspace(A0)
+    R      = Matrix(rowspaceR)                       # orthogonal complement of nullspace(h₊)
+    L      = Matrix(rowspaceL)                       # orthogonal complement of nullspace(h₋)
+    hmQ0   = h₋ * parent(rowspaceR)                  # h₋ * [R B] = h₋ * Q0, needed for Jordan chain 
+    n      = size(h₀, 2)
+    r      = size(R, 2)
+    b      = size(B, 2)
+    T      = eltype(h₀)
+    h₊R    = h₊*R
+    hRR    = R'*h₊R
+    hBR    = B'*h₊R
+    hLR    = L'*h₊R
+    gRR⁻¹  = - R'*h₀*R
+    gBB⁻¹  = - B'*h₀*B
+    gRB⁻¹  = - R'*h₀*B
+    gBR⁻¹  = gRB⁻¹'
+    Adef   = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
+    Bdef   = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
+    Ablock = Matrix([0I I spzeros(r, b); -hRR gRR⁻¹ gRB⁻¹])
+    Bblock = Matrix([I 0I spzeros(r, b); 0I hRR' hBR'])
+    Vblock´ = M([-hBR gBR⁻¹ gBB⁻¹]')
+    ωshifterAV = diag(gRR⁻¹), (r+1:2r, r+1:2r), diag(gBB⁻¹), (2r+1:2r+b, 1:b)
+    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, Vblock´, ωshifterAV, atol)
 end
 
-function get_C4_AB(C4lin::Linearization, deflator::Deflator)
-    A = copy!(deflator.Adense, C4lin.B)
-    B = copy!(deflator.Bdense, C4lin.A)
-    return A, B
+## Tools
+
+function shiftω!(d::Deflator, ω)
+    diagRR, rowcolA, diagBB, rowcolV = d.ωshifterAV
+    for (v, row, col) in zip(diagRR, rowcolA...)
+        d.Ablock[row, col] = ω + v
+    end
+    for (v, row, col) in zip(diagBB, rowcolV...)
+        d.Vblock´[row, col] = conj(ω) + v
+    end
+    return d
 end
 
 function idsLR(deflator)
     l, r = size(deflator.L, 2), size(deflator.R, 2)
     iL, iR = 1:l, l+1:l+r
     return iL, iR
-end
-
-function shiftω!(d::Deflator, ω)
-    d.lin.A .= d.Aω0 .+ ω .* d.QIV
-    return d
 end
 
 function orthobasis_decomposition_qr(mat, atol)
@@ -270,10 +278,27 @@ nullspace_qr(mat, atol) = last(fullrank_decomposition_qr(mat, atol))
 
 rowspace_qr(mat, atol) = first(fullrank_decomposition_qr(mat, atol))
 
-## Solver execution: compute self-energy, with or without deflation
-(s::SingleShot1DGreensSolver)(ω) = s(ω, Val{:R})
+## Deflate
 
-function (s::SingleShot1DGreensSolver{Missing})(ω, which)
+function deflate(d::Deflator{T,<:SparseMatrixCSC}, ω) where {T}
+    # shift diagonal of appropriate subblocks of Ablock and Vblock´
+    shiftω!(d, ω)
+    r = size(d.R, 2)
+    m = size(d.Vblock´, 1)  # m = 2r+b
+    # Vblock = [RP´ 0] * Q' = b × 2r+b; Q = [rowspaceV nullspaceV] = 2r+b × 2r+b = m × m
+    # nullspaceV is 2r+b × 2r
+    nullspaceV = getQ_dense(pqr(d.Vblock´), m-2r+1:m)
+    Adef = mul!(d.Adef, d.Ablock, nullspaceV)
+    Bdef = mul!(d.Bdef, d.Bblock, nullspaceV)
+    Q1 = view(nullspaceV, 1:r, :)
+    Q2 = view(nullspaceV, r+1:m, :)
+    return Adef, Bdef, Q1, Q2
+end
+
+## Solver execution: compute self-energy, with or without deflation
+(s::Schur1DGreensSolver)(ω) = s(ω, Val{:R})
+
+function (s::Schur1DGreensSolver{Missing})(ω, which)
     A = Matrix([ω*I - s.h0 -s.hp; -I 0I])
     B = Matrix([s.hm 0I; 0I -I])
     sch = schur(A, B)
@@ -303,38 +328,37 @@ end
 nondeflated_selfenergy(::Type{Val{:RL}}, s, sch) =
     nondeflated_selfenergy(Val{:R}, s, sch), nondeflated_selfenergy(Val{:L}, s, sch)
 
-(s::SingleShot1DGreensSolver{<:Deflator})(ω, ::Type{Val{:R}}) =
+(s::Schur1DGreensSolver{<:Deflator})(ω, ::Type{Val{:R}}) =
     deflated_selfenergy(s.deflatorR, s, ω)
 
-(s::SingleShot1DGreensSolver{<:Deflator})(ω, ::Type{Val{:L}}) =
+(s::Schur1DGreensSolver{<:Deflator})(ω, ::Type{Val{:L}}) =
     deflated_selfenergy(s.deflatorL, s, ω)
 
-(s::SingleShot1DGreensSolver{<:Deflator})(ω, ::Type{Val{:RL}}) =
+(s::Schur1DGreensSolver{<:Deflator})(ω, ::Type{Val{:RL}}) =
     deflated_selfenergy(s.deflatorR, s, ω), deflated_selfenergy(s.deflatorL, s, ω)
 
-function deflated_selfenergy(deflator::Deflator{T,M}, s::SingleShot1DGreensSolver, ω) where {T,M}
-    shiftω!(deflator, ω)
-    d = deflate(deflator.lin; atol = deflator.atol)
-    A, B = get_C4_AB(d, deflator)
-    n = size(d.V, 1) ÷ 2
-    V1 = view(d.V, 1:n, :)
-    V2 = view(d.V, n+1:2n, :)
-
+function deflated_selfenergy(deflator::Deflator{T,M}, s::Schur1DGreensSolver, ω) where {T,M}
+    A, B, Q1, Q2 = deflate(deflator, ω)
     # find right-moving eigenvectors with atol < |λ| < 1
     sch = schur!(A, B)
     rmodes = retarded_modes(sch, deflator.atol)
     nr = sum(rmodes)
     ordschur!(sch, rmodes)
-    R = deflator.R
-    Z11 = V1 * view(sch.Z, :, 1:nr)
-    Z21 = V2 * view(sch.Z, :, 1:nr)
+    Zret = view(sch.Z, :, 1:nr)
+    R, h₋Q0 = deflator.R, deflator.hmQ0
+    # Qs = [Q1; Q2]; [φR; χR; χB] = Qs * Zret * R11
+    # R'φ = φR = R'Z11 * R11, where R'Z11 = Q1 * Zret
+    # Q0'*χ = Q0'*φ*Λ = [χR; χB]
+    # h₋χ = h₋ * Q0 * [χR; χB] = h₋ * Q0 * Q2 * Zret * R11 = Z21 * R11, where Z21 = h₋ * Q0 * Q2 * Zret
+    R´Z11 = Q1 * Zret
+    Z21   = h₋Q0 * Q2 * Zret
     # add generalized eigenvectors until we span the full R space
-    R´source, target = add_jordan_chain(deflator, ω*I - s.h0, R'Z11, Z21)
+    R´source, target = add_jordan_chain(deflator, ω*I - s.h0, R´Z11, Z21)
 
     ΣR = M(target * (R´source \ R'))
 
     # @show size(R´source), cond(R´source)
-    # @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
+    @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
 
     return ΣR
 end
@@ -350,24 +374,28 @@ end
 function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
     local ΣRR, R´φg_candidates, source_rowspace
     g0⁻¹ = integrate_out_bulk(A1, d)
-    h₊, h₋ = d.hLR, d.hRL
+    h₊ = d.hLR
+    h₋ = h₊'
     iL, iR = idsLR(d)
     Σ = zero(g0⁻¹)
     G0 = inv(g0⁻¹)
-    GLL = view(G0, iL, iL)
-    GRLh₊ = view(G0, iR, iL)*h₊
+    GLLh₊ = view(G0, iL, iL) * h₊
+    GRLh₊ = view(G0, iR, iL) * h₊
     R´source = similar(R´Z11, size(R´Z11, 1), 0)
     maxiter = 10
     for n in 1:maxiter
         # when R´source is square, it will be full rank and invertible.
-        # Exit after computing last ΣRR in the recursive Green function iteration of GLL and GRL*h₊
-        ΣRR = h₋*GLL*h₊
+        # Exit after computing last ΣRR in the recursive Green function iteration of GLL*h₊ and GRL*h₊
+        ΣRR = h₋*GLLh₊
         size(R´source, 1) == size(R´source, 2) && break
         copy!(view(Σ, iR, iR), ΣRR)
         G0 = inv(g0⁻¹ - Σ)
-        GLL = view(G0, iL, iL)
+        GLLh₊ = view(G0, iL, iL) * h₊
         GRLh₊ = GRLh₊ * view(G0, iR, iL) * h₊
         R´φg_candidates = nullspace_qr(GRLh₊, d.atol)
+        # iterate [R´Z11 R´φg_candidates] = [R´source 0] [source_rowspace; ....] until R´source is full rank
+        # Then Σ = [Z21 φgJ_candidates] ([R´Z11 R´φg_candidates] \ R') = [R´Z11 φgJ_candidates] * source_rowspace * inv(R´source) * R'
+        # we have built a full-rank basis R´source of the space spanned by [R´Z11 φgJ_candidates], which we can invert
         source_rowspace, R´source, _ = fullrank_decomposition_qr([R´Z11 R´φg_candidates], d.atol)
     end
     φgJ_candidates = d.R * ΣRR * R´φg_candidates
@@ -386,7 +414,7 @@ end
 ### Greens execution
 
 # Choose codepath
-function (g::GreensFunction{<:SingleShot1DGreensSolver})(ω, cells; kw...)
+function (g::GreensFunction{<:Schur1DGreensSolver})(ω, cells; kw...)
     cells´ = sanitize_cells(cells, g)
     if is_infinite_local(cells´, g)
         gω = local_fastpath(g, ω; kw...)
@@ -400,22 +428,22 @@ function (g::GreensFunction{<:SingleShot1DGreensSolver})(ω, cells; kw...)
     return gω
 end
 
-is_infinite_local((src, dst), g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Missing}}) =
+is_infinite_local((src, dst), g::GreensFunction{<:Schur1DGreensSolver,1,Tuple{Missing}}) =
     only(src) == only(dst)
 is_infinite_local(cells, g) = false
 
-is_at_surface((src, dst), g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
+is_at_surface((src, dst), g::GreensFunction{<:Schur1DGreensSolver,1,Tuple{Int}}) =
     abs(dist_to_boundary(src, g)) == 1 || abs(dist_to_boundary(dst, g)) == 1
 is_at_surface(cells, g) = false
 
-is_across_boundary((src, dst), g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
+is_across_boundary((src, dst), g::GreensFunction{<:Schur1DGreensSolver,1,Tuple{Int}}) =
     sign(dist_to_boundary(src, g)) != sign(dist_to_boundary(src, g)) ||
     dist_to_boundary(src, g) == 0 || dist_to_boundary(dst, g) == 0
 is_across_boundary(cells, g) = false
 
-dist_to_boundary(cell, g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
+dist_to_boundary(cell, g::GreensFunction{<:Schur1DGreensSolver,1,Tuple{Int}}) =
     only(cell) - only(g.boundaries)
-dist_to_boundary((src, dst)::Pair, g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}}) =
+dist_to_boundary((src, dst)::Pair, g::GreensFunction{<:Schur1DGreensSolver,1,Tuple{Int}}) =
     dist_to_boundary(src, g), dist_to_boundary(dst, g)
 
 ## Fast-paths
@@ -456,7 +484,7 @@ end
 ## General paths
 
 # Infinite: G∞_{N}  = GVᴺ G∞_{0}
-function (g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Missing}})(ω, ::Missing)
+function (g::GreensFunction{<:Schur1DGreensSolver,1,Tuple{Missing}})(ω, ::Missing)
     G∞⁻¹, GRh₊, GLh₋ = Gfactors(g.solver, ω)
     luG∞⁻¹ = lu(G∞⁻¹)
     return cells -> G_infinite(luG∞⁻¹, GRh₊, GLh₋, cells)
@@ -471,7 +499,7 @@ function G_infinite(luG∞⁻¹, GRh₊, GLh₋, (src, dst))
 end
 
 # Semiinifinite: G_{N,M} = (Ghᴺ⁻ᴹ - GhᴺGh⁻ᴹ)G∞_{0}
-function (g::GreensFunction{<:SingleShot1DGreensSolver,1,Tuple{Int}})(ω, ::Missing)
+function (g::GreensFunction{<:Schur1DGreensSolver,1,Tuple{Int}})(ω, ::Missing)
     @show 1
     G∞⁻¹, GRh₊, GLh₋ = Gfactors(g.solver, ω)
     return cells -> G_semiinfinite(G∞⁻¹, GRh₊, GLh₋, dist_to_boundary.(cells, Ref(g)))
@@ -487,7 +515,7 @@ function G_semiinfinite(G∞⁻¹, Gh₊, Gh₋, (N, M))
     return G∞
 end
 
-function Gfactors(solver::SingleShot1DGreensSolver, ω)
+function Gfactors(solver::Schur1DGreensSolver, ω)
     ΣR, ΣL = solver(ω, Val{:RL})
     A1 = ω*I - solver.h0
     GR⁻¹ = A1 - ΣR

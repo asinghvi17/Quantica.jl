@@ -369,3 +369,79 @@ rclamp(r1::UnitRange, r2::UnitRange) = isempty(r1) ? r1 : clamp(minimum(r1), ext
 
 iclamp(minmax, r::Missing) = minmax
 iclamp((x1, x2), (xmin, xmax)) = (max(x1, xmin), min(x2, xmax))
+
+############################################################################################
+# QR utils
+############################################################################################
+# Sparse QR from SparseSuite is also pivoted
+pqr(a::SparseMatrixCSC) = qr(a)
+pqr(a::Adjoint{T,<:SparseMatrixCSC}) where {T} = qr(copy(a))
+pqr(a::Transpose{T,<:SparseMatrixCSC}) where {T} = qr(copy(a))
+pqr(a) = qr!(copy(a), Val(true))
+
+getQ(qr::Factorization, cols = :) = qr.Q * Idense(size(qr, 1), cols)
+getQ(qr::SuiteSparse.SPQR.QRSparse, cols = :) =  Isparse(size(qr, 1), :, qr.prow) * sparse(qr.Q * Idense(size(qr, 1), cols))
+getQ_dense(qr::SuiteSparse.SPQR.QRSparse, cols = :) =  Isparse(size(qr, 1), :, qr.prow) * (qr.Q * Idense(size(qr, 1), cols))
+
+getQ´(qr::Factorization, cols = :) = qr.Q' * Idense(size(qr, 1), cols)
+getQ´(qr::SuiteSparse.SPQR.QRSparse, cols = :) = sparse((qr.Q * Idense(size(qr, 1), cols))') * Isparse(size(qr,1), qr.prow, :)
+
+getRP´(qr::Factorization) = qr.R * qr.P'
+getRP´(qr::SuiteSparse.SPQR.QRSparse) = qr.R * Isparse(size(qr, 2), qr.pcol, :)
+
+getPR´(qr::Factorization) = qr.P * qr.R'
+getPR´(qr::SuiteSparse.SPQR.QRSparse) = Isparse(size(qr, 2), :, qr.pcol) * qr.R'
+
+Idense(n, ::Colon) = Matrix(I, n, n)
+
+function Idense(n, cols)
+    m = zeros(Bool, n, length(cols))
+    for (j, col) in enumerate(cols)
+        m[col, j] = true
+    end
+    return m
+end
+
+# Equivalent to I(n)[rows, cols], but faster
+Isparse(n, rows, cols) = Isparse(inds(rows, n), inds(cols, n))
+
+function Isparse(rows, cols)
+    rowval = Int[]
+    nzval = Bool[]
+    colptr = Vector{Int}(undef, length(cols) + 1)
+    colptr[1] = 1
+    for (j, col) in enumerate(cols)
+        push_rows!(rowval, nzval, rows, col)
+        colptr[j+1] = length(rowval) + 1
+    end
+    return SparseMatrixCSC(length(rows), length(cols), colptr, rowval, nzval)
+end
+
+inds(::Colon, n) = 1:n
+inds(is, n) = is
+
+function push_rows!(rowval, nzval, rows::AbstractUnitRange, col)
+    if col in rows
+        push!(rowval, 1 + rows[1 + col - first(rows)] - first(rows))
+        push!(nzval, true)
+    end
+    return nothing
+end
+
+function push_rows!(rowval, nzval, rows, col)
+    for (j, row) in enumerate(rows)
+        if row == col
+            push!(rowval, j)
+            push!(nzval, true)
+        end
+    end
+    return nothing
+end
+
+function nonzero_rows(m::AbstractMatrix{T}, atol = default_tol(T)) where {T}
+    row = 0
+    for outer row in reverse(1:size(m, 1))
+        maximum(abs, view(m, row, :)) > atol && break
+    end
+    return row
+end
