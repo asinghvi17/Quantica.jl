@@ -272,6 +272,13 @@ function shiftω!(d::Deflator, ω)
     return d
 end
 
+function shiftω!(mat::AbstractMatrix, ω)
+    @inbounds for i in axes(mat, 1)
+        mat[i, i] += ω
+    end
+    return mat
+end
+
 function idsLR(deflator)
     l, r = size(deflator.L, 2), size(deflator.R, 2)
     iL, iR = 1:l, l+1:l+r
@@ -501,7 +508,11 @@ function surface_fastpath(g, ω, (dsrc, ddst); source = all_sources(g))
     dist = ddst - dsrc
     Σ = dsrc > 0 ? g.solver(ω, Val{:R}) : g.solver(ω, Val{:L})
     h0 = g.solver.h0
-    luG⁻¹ = lu(ω*I - h0 - Σ)
+    # in-place optimization of luG⁻¹ = lu(ω*I - h0 - Σ)
+        G⁻¹ = Σ
+        @. G⁻¹ = - h0 - Σ
+        shiftω!(G⁻¹, ω)
+        luG⁻¹ = lu!(G⁻¹)
     if dist == 0
         G = ldiv!(luG⁻¹, source)
     else
