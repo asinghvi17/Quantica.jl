@@ -158,12 +158,13 @@ struct DeflatorWorkspace{T}
     nn::Matrix{T}
     nr::Matrix{T}
     rr::Matrix{T}
+    mb::Matrix{T}
 end
 
 DeflatorWorkspace{T}(n, r, l) where {T} =
-    DeflatorWorkspace(Matrix{T}.(undef, ((n,l), (l+r, l+r), (n, n), (n, r), (r, r)))...)
+    DeflatorWorkspace(Matrix{T}.(undef, ((n,l), (l+r, l+r), (n, n), (n, r), (r, r), (n+r, n-r)))...)
 
-struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S,H}
+struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S}
     hmQ0::M             # h₋*Q0 where Q0 = [rowspace(A0) nullspace(A0)]. h₊ = [R' 0] Q0'. h₋ = Q0 [R; 0]
     R::Matrix{T}        # A0 = [-hRR 0; -hBR  0] * [R'; B' ]. R = orthogonal complement of nullspace(A0) === rowspace(A0)
     L::Matrix{T}        # A2 = [-hLL 0; -hB´L 0] * [L'; B´']. L = orthogonal complement of nullspace(A2) === rowspace(A2)
@@ -172,11 +173,9 @@ struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S,H}
     Bdef::Matrix{T}     # deflated B
     Ablock::Matrix{T}   # Adef = Ablock * QR; Ablock = [0 I 0; -hRR gRR⁻¹ gRB⁻¹]
     Bblock::Matrix{T}   # Bdef = Bblock * QR; Bblock = [I 0 0; 0 hRR' hBR']
-    ωshifter::S         # metadata to aid in ω-shifting the relevant A subblocks
-    hessBB::H           # hessenberg(gBB⁻¹)
-    h10BR::Matrix{T}    # [hBR -gBR⁻¹]
-    Qs::Matrix{T}       # [Q1; Q2] = [I 0; 0 I; gBB*h10BR]
+    Vblock´::Matrix{T}  # # Vblock = [-hBR gBR⁻¹ gBB⁻¹] = [R 0] [QB'; QR']. Vblock´ = Matrix(Vblock')
     ig0::Matrix{T}      # Matrix(-h₀)
+    ωshifter::S         # metadata to aid in ω-shifting the relevant A subblocks
     atol::R             # A0, A2 deflation tolerance
     tmp::DeflatorWorkspace{T}
 end
@@ -251,20 +250,21 @@ function Deflator(atol::Real, h₊::M, h₀::M, h₋::M) where {M}
     Bdef    = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
     Ablock  = Matrix([0I I spzeros(r, b); -hRR gRR⁻¹ gRB⁻¹])
     Bblock  = Matrix([I 0I spzeros(r, b); 0I hRR' hBR'])
-    ωshifter = diag(gRR⁻¹), (r+1:2r, r+1:2r), diag(g0⁻¹)
-    h10BR   = [hBR -gBR⁻¹]
-    hessBB  = hessenberg!(gBB⁻¹)
-    Qs      = Matrix([I; spzeros(T, b, 2r)])
+    Vblock´ = Matrix([-hBR gBR⁻¹ gBB⁻¹]')
+    ωshifter = diag(gRR⁻¹), (r+1:2r, r+1:2r), diag(gBB⁻¹), (2r+1:2r+b, 1:b), diag(g0⁻¹)
     tmp     = DeflatorWorkspace{T}(n, r, l)
-    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, ωshifter, hessBB, h10BR, Qs, g0⁻¹, atol, tmp)
+    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, Vblock´, g0⁻¹, ωshifter, atol, tmp)
 end
 
 ## Tools
 
 function shiftω!(d::Deflator, ω)
-    diagRR, rowcolA, diagg0⁻¹ = d.ωshifter
+    diagRR, rowcolA, diagBB, rowcolV, diagg0⁻¹ = d.ωshifter
     for (v, row, col) in zip(diagRR, rowcolA...)
         d.Ablock[row, col] = ω + v
+    end
+    for (v, row, col) in zip(diagBB, rowcolV...)
+        d.Vblock´[row, col] = conj(ω) + v
     end
     for (n, v) in enumerate(diagg0⁻¹)
         d.ig0[n, n] = ω + v
@@ -309,16 +309,18 @@ rowspace_qr(mat, atol) = first(fullrank_decomposition_qr(mat, atol))
 ## Deflate
 
 function deflate(d::Deflator{T,<:SparseMatrixCSC}, ω) where {T}
-    # nullspace is the 2r+b × 2r nullspace Qs of [-h1BR gBR⁻¹ gBB⁻¹] (which is b × 2r+b)
-    b = size(d.hessBB, 1)
-    r = size(d.h10BR, 2) ÷ 2
-    Qs = d.Qs
-    Q1  = view(Qs, 1:r, :)
-    Q2  = view(Qs, r+1:2r+b, :)
-    Q2´ = view(Qs, 2r+1:2r+b, :)
-    ldiv!(Q2´, d.hessBB + ω*I, d.h10BR)
-    Adef = mul!(d.Adef, d.Ablock, Qs)
-    Bdef = mul!(d.Bdef, d.Bblock, Qs)
+    # shift diagonal of appropriate subblocks of Ablock and Vblock´
+    shiftω!(d, ω)
+    r = size(d.R, 2)
+    m = size(d.Vblock´, 1)  # m = 2r+b
+    # Vblock´ = [RP´ 0] * Q' = b × 2r+b; Q = [rowspaceV nullspaceV] = 2r+b × 2r+b = m × m
+    # nullspaceV is 2r+b × 2r
+    Vblock´ = copy!(d.tmp.mb, d.Vblock´)  # ::Matrix{T}
+    nullspaceV = getQ(qr!(Vblock´, Val(true)), m-2r+1:m)
+    Adef = mul!(d.Adef, d.Ablock, nullspaceV)
+    Bdef = mul!(d.Bdef, d.Bblock, nullspaceV)
+    Q1 = view(nullspaceV, 1:r, :)
+    Q2 = view(nullspaceV, r+1:m, :)
     return Adef, Bdef, Q1, Q2
 end
 
