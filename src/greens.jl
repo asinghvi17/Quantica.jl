@@ -168,6 +168,8 @@ struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S,H}
     m1_rr::Matrix{T}
     m1_nr::Matrix{T}
     m2_nr::Matrix{T}
+    m1_rn::Matrix{T}
+    m1_nn::Matrix{T}
 end
 
 struct Schur1DGreensSolver{D<:Union{Deflator,Missing},M} <: AbstractGreensSolver
@@ -245,7 +247,9 @@ function Deflator(atol::Real, h₊::M, h₀::M, h₋::M) where {M}
     m1_rr  = Matrix{T}(undef, r, r)
     m1_nr  = Matrix{T}(undef, n, r)
     m2_nr  = Matrix{T}(undef, n, r)
-    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, ωshifterA, hessBB, h10BR, Qs, atol, m1_rr, m1_nr, m2_nr)
+    m1_rn  = Matrix{T}(undef, r, n)
+    m1_nn  = Matrix{T}(undef, n, n)
+    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, ωshifterA, hessBB, h10BR, Qs, atol, m1_rr, m1_nr, m2_nr, m1_rn, m1_nn)
 end
 
 ## Tools
@@ -364,16 +368,19 @@ function deflated_selfenergy(deflator::Deflator{T,M}, s::Schur1DGreensSolver, ω
     R´Z11 = mul!(deflator.m1_rr, Q1, Zret)
     Z21   = mul!(deflator.m1_nr, h₋Q0, mul!(deflator.m2_nr, Q2, Zret))
 
-    # # R´source, target = R´Z11, Z21
+    R´source, target = R´Z11, Z21
     # # add generalized eigenvectors until we span the full R space
     # R´source, target = add_jordan_chain(deflator, ω*I - s.h0, R´Z11, Z21)
 
     # ΣR = M(target * (R´source \ R'))
+    # R´ = copy!(deflator.m1_rn, R')
+    # ΣR = mul!(deflator.m1_nn, target, ldiv!(lu!(R´source), R´))
+    ΣR = mul!(deflator.m1_nn, rdiv!(target, lu!(R´source)), R')
 
     # # # # @show size(R´source), cond(R´source)
     # # # @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
 
-    # return ΣR
+    return ΣR
 end
 
 # need this barrier for type-stability (sch.α and sch.β are finicky)
