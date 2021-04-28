@@ -198,7 +198,7 @@ end
 
 function deflated_size_text(g::GreensFunction)
     text = hasdeflator(g.solver) <= 0 ? "No deflation" :
-        "$(deflated_size_text(g.solver.deflatorR)) (right), $(deflated_size_text(g.solver.deflatorL)) (left)"
+        "$(deflated_size_text(g.solver.deflatorR))"
     return text
 end
 
