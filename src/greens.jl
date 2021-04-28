@@ -151,7 +151,7 @@ end
 
 Schur1D(; atol = missing) = Schur1D(atol)
 
-struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S}
+struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S,H}
     hmQ0::M             # h₋*Q0 where Q0 = [rowspace(A0) nullspace(A0)]. h₊ = [R' 0] Q0'. h₋ = Q0 [R; 0]
     R::Matrix{T}        # A0 = [-hRR 0; -hBR  0] * [R'; B' ]. R = orthogonal complement of nullspace(A0) === rowspace(A0)
     L::Matrix{T}        # A2 = [-hLL 0; -hB´L 0] * [L'; B´']. L = orthogonal complement of nullspace(A2) === rowspace(A2)
@@ -160,8 +160,10 @@ struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S}
     Bdef::Matrix{T}     # deflated B
     Ablock::Matrix{T}   # Adef = Ablock * QR; Ablock = [0 I 0; -hRR gRR⁻¹ gRB⁻¹]
     Bblock::Matrix{T}   # Bdef = Bblock * QR; Bblock = [I 0 0; 0 hRR' hBR']
-    Vblock´::M          # Vblock = [-hBR gBR⁻¹ gBB⁻¹] = [R 0] [QB'; QR']. Vblock´ = sparse(Vblock')
-    ωshifterAV::S       # metadata to aid in ω-shifting the relevant A and V subblocks
+    ωshifterA::S        # metadata to aid in ω-shifting the relevant A subblocks
+    hessBB::H           # hessenberg(gBB⁻¹)
+    h10BR::Matrix{T}    # [hBR -gBR⁻¹]
+    Qs::Matrix{T}       # [Q1; Q2] = [I 0; 0 I; gBB*h10BR]
     atol::R             # A0, A2 deflation tolerance
 end
 
@@ -187,7 +189,7 @@ function deflated_size_text(g::GreensFunction)
     return text
 end
 
-deflated_size_text(d::Deflator) = "$(size(d.Adef, 1)) × $(size(d.Adef, 2))"
+deflated_size_text(d::Deflator) = "$(size(d.Adef, 1) ÷ 2) × $(size(d.Adef, 2) ÷ 2)"
 
 Base.summary(g::GreensFunction{<:Schur1DGreensSolver}) =
     "GreensFunction{Schur1DGreensSolver}: Green's function using the Schur1D method"
@@ -233,20 +235,19 @@ function Deflator(atol::Real, h₊::M, h₀::M, h₋::M) where {M}
     Bdef   = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
     Ablock = Matrix([0I I spzeros(r, b); -hRR gRR⁻¹ gRB⁻¹])
     Bblock = Matrix([I 0I spzeros(r, b); 0I hRR' hBR'])
-    Vblock´ = M([-hBR gBR⁻¹ gBB⁻¹]')
-    ωshifterAV = diag(gRR⁻¹), (r+1:2r, r+1:2r), diag(gBB⁻¹), (2r+1:2r+b, 1:b)
-    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, Vblock´, ωshifterAV, atol)
+    ωshifterA = diag(gRR⁻¹), (r+1:2r, r+1:2r)
+    h10BR  = [hBR -gBR⁻¹]
+    hessBB = hessenberg!(gBB⁻¹)
+    Qs     = Matrix([I; spzeros(T, b, 2r)])
+    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, ωshifterA, hessBB, h10BR, Qs, atol)
 end
 
 ## Tools
 
 function shiftω!(d::Deflator, ω)
-    diagRR, rowcolA, diagBB, rowcolV = d.ωshifterAV
+    diagRR, rowcolA = d.ωshifterA
     for (v, row, col) in zip(diagRR, rowcolA...)
         d.Ablock[row, col] = ω + v
-    end
-    for (v, row, col) in zip(diagBB, rowcolV...)
-        d.Vblock´[row, col] = conj(ω) + v
     end
     return d
 end
@@ -283,15 +284,17 @@ rowspace_qr(mat, atol) = first(fullrank_decomposition_qr(mat, atol))
 function deflate(d::Deflator{T,<:SparseMatrixCSC}, ω) where {T}
     # shift diagonal of appropriate subblocks of Ablock and Vblock´
     shiftω!(d, ω)
-    r = size(d.R, 2)
-    m = size(d.Vblock´, 1)  # m = 2r+b
-    # Vblock = [RP´ 0] * Q' = b × 2r+b; Q = [rowspaceV nullspaceV] = 2r+b × 2r+b = m × m
-    # nullspaceV is 2r+b × 2r
-    nullspaceV = getQ_dense(pqr(d.Vblock´), m-2r+1:m)
-    Adef = mul!(d.Adef, d.Ablock, nullspaceV)
-    Bdef = mul!(d.Bdef, d.Bblock, nullspaceV)
-    Q1 = view(nullspaceV, 1:r, :)
-    Q2 = view(nullspaceV, r+1:m, :)
+    # nullspace is the 2r+b × 2r nullspace Qs of [-h1BR gBR⁻¹ gBB⁻¹] (which is b × 2r+b)
+    hessBB = d.hessBB
+    b = size(hessBB, 1)
+    r = size(d.h10BR, 2) ÷ 2
+    Qs = d.Qs
+    Q1  = view(Qs, 1:r, :)
+    Q2  = view(Qs, r+1:2r+b, :)
+    Q2´ = view(Qs, 2r+1:2r+b, :)
+    ldiv!(Q2´, d.hessBB + ω*I, d.h10BR)
+    Adef = mul!(d.Adef, d.Ablock, Qs)
+    Bdef = mul!(d.Bdef, d.Bblock, Qs)
     return Adef, Bdef, Q1, Q2
 end
 
@@ -358,8 +361,8 @@ function deflated_selfenergy(deflator::Deflator{T,M}, s::Schur1DGreensSolver, ω
 
     ΣR = M(target * (R´source \ R'))
 
-    # # @show size(R´source), cond(R´source)
-    # @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
+    # # # @show size(R´source), cond(R´source)
+    # # @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
 
     return ΣR
 end
