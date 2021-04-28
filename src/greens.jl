@@ -527,7 +527,11 @@ end
 function local_fastpath(g, ω; source = all_sources(g))
     ΣR, ΣL = g.solver(ω, Val{:RL})
     h0 = g.solver.h0
-    luG∞⁻¹ = lu(ω*I - h0 - ΣR - ΣL)
+    # in-place optimization of luG∞⁻¹ = lu(ω*I - h0 - ΣL - ΣR)
+        G∞⁻¹ = ΣR
+        @. G∞⁻¹ = - h0 - ΣR - ΣL
+        shiftω!(G∞⁻¹, ω)
+        luG∞⁻¹ = lu!(G∞⁻¹)
     G∞ = ldiv!(luG∞⁻¹, source)
     return G∞
 end
