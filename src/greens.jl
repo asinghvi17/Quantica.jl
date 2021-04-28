@@ -562,7 +562,6 @@ end
 
 # Semiinifinite: G_{N,M} = (Ghᴺ⁻ᴹ - GhᴺGh⁻ᴹ)G∞_{0}
 function (g::GreensFunction{<:Schur1DGreensSolver,1,Tuple{Int}})(ω, ::Missing)
-    @show 1
     G∞⁻¹, GRh₊, GLh₋ = Gfactors(g.solver, ω)
     return cells -> G_semiinfinite(G∞⁻¹, GRh₊, GLh₋, dist_to_boundary.(cells, Ref(g)))
 end
