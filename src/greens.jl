@@ -368,17 +368,18 @@ function deflated_selfenergy(d::Deflator{T,M}, s::Schur1DGreensSolver, ω) where
     ordschur!(sch, rmodes)
     Zret = view(sch.Z, :, 1:nr)
     R, h₋Q0 = d.R, d.hmQ0
-    # Qs = [Q1; Q2]; [φR; χR; χB] = Qs * Zret * R11
-    # R'φ = φR = R'Z11 * R11, where R'Z11 = Q1 * Zret
-    # Q0'*χ = Q0'*φ*Λ = [χR; χB]
-    # h₋χ = h₋ * Q0 * [χR; χB] = h₋ * Q0 * Q2 * Zret * R11 = Z21 * R11, where Z21 = h₋ * Q0 * Q2 * Zret
-    # R´Z11 = Q1 * Zret
-    # Z21   = h₋Q0 * Q2 * Zret
+    ## Qs    = [Q1; Q2]; [φR; χR; χB] = Qs * Zret * R11
+    ## R'φ   = φR = R'Z11 * R11, where R'Z11 = Q1 * Zret
+    ## Q0'*χ = Q0'*φ*Λ = [χR; χB]
+    ## h₋χ   = h₋ * Q0 * [χR; χB] = h₋ * Q0 * Q2 * Zret * R11 = Z21 * R11, where Z21 = h₋ * Q0 * Q2 * Zret
+    ## R´Z11 = Q1 * Zret
+    ## Z21   = h₋Q0 * Q2 * Zret
     R´Z11 = mul!(d.tmp.rr, Q1, Zret)
     Z21   = mul!(d.tmp.nr, h₋Q0, mul!(d.tmp.nr2, Q2, Zret))
 
-    # # add generalized eigenvectors until we span the full R space
+    ## add generalized eigenvectors until we span the full R space
     R´source, target = add_jordan_chain(d, d.ig0, R´Z11, Z21)
+    # R´source, target = R´Z11, Z21
 
     # ΣR = M(target * (R´source \ R'))
     ΣR = mul!(d.tmp.nn, rdiv!(target, lu!(R´source)), R')
