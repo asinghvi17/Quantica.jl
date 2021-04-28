@@ -151,6 +151,19 @@ end
 
 Schur1D(; atol = missing) = Schur1D(atol)
 
+
+struct DeflatorWorkspace{T}
+    nl::Matrix{T}
+    ss::Matrix{T}
+    nn::Matrix{T}
+    nr::Matrix{T}
+    nr2::Matrix{T}
+    rr::Matrix{T}
+end
+
+DeflatorWorkspace{T}(n, r, l) where {T} =
+    DeflatorWorkspace(Matrix{T}.(undef, ((n,l), (l+r, l+r), (n, n), (n, r), (n, r), (r, r)))...)
+
 struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S,H}
     hmQ0::M             # h₋*Q0 where Q0 = [rowspace(A0) nullspace(A0)]. h₊ = [R' 0] Q0'. h₋ = Q0 [R; 0]
     R::Matrix{T}        # A0 = [-hRR 0; -hBR  0] * [R'; B' ]. R = orthogonal complement of nullspace(A0) === rowspace(A0)
@@ -160,16 +173,13 @@ struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S,H}
     Bdef::Matrix{T}     # deflated B
     Ablock::Matrix{T}   # Adef = Ablock * QR; Ablock = [0 I 0; -hRR gRR⁻¹ gRB⁻¹]
     Bblock::Matrix{T}   # Bdef = Bblock * QR; Bblock = [I 0 0; 0 hRR' hBR']
-    ωshifterA::S        # metadata to aid in ω-shifting the relevant A subblocks
+    ωshifter::S         # metadata to aid in ω-shifting the relevant A subblocks
     hessBB::H           # hessenberg(gBB⁻¹)
     h10BR::Matrix{T}    # [hBR -gBR⁻¹]
     Qs::Matrix{T}       # [Q1; Q2] = [I 0; 0 I; gBB*h10BR]
+    ig0::Matrix{T}      # Matrix(-h₀)
     atol::R             # A0, A2 deflation tolerance
-    m1_rr::Matrix{T}
-    m1_nr::Matrix{T}
-    m2_nr::Matrix{T}
-    m1_rn::Matrix{T}
-    m1_nn::Matrix{T}
+    tmp::DeflatorWorkspace{T}
 end
 
 struct Schur1DGreensSolver{D<:Union{Deflator,Missing},M} <: AbstractGreensSolver
@@ -220,44 +230,45 @@ Deflator(atol::Nothing, As...) = missing
 function Deflator(atol::Real, h₊::M, h₀::M, h₋::M) where {M}
     rowspaceR, _, nullspaceR = fullrank_decomposition_qr(h₊, atol)
     rowspaceL, _, _ = fullrank_decomposition_qr(h₋, atol)
-    B      = Matrix(nullspaceR)                      # nullspace(A0)
-    R      = Matrix(rowspaceR)                       # orthogonal complement of nullspace(h₊)
-    L      = Matrix(rowspaceL)                       # orthogonal complement of nullspace(h₋)
-    hmQ0   = h₋ * parent(rowspaceR)                  # h₋ * [R B] = h₋ * Q0, needed for Jordan chain 
-    n      = size(h₀, 2)
-    r      = size(R, 2)
-    b      = size(B, 2)
-    T      = eltype(h₀)
-    h₊R    = h₊*R
-    hRR    = R'*h₊R
-    hBR    = B'*h₊R
-    hLR    = L'*h₊R
-    gRR⁻¹  = - R'*h₀*R
-    gBB⁻¹  = - B'*h₀*B
-    gRB⁻¹  = - R'*h₀*B
-    gBR⁻¹  = gRB⁻¹'
-    Adef   = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
-    Bdef   = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
-    Ablock = Matrix([0I I spzeros(r, b); -hRR gRR⁻¹ gRB⁻¹])
-    Bblock = Matrix([I 0I spzeros(r, b); 0I hRR' hBR'])
-    ωshifterA = diag(gRR⁻¹), (r+1:2r, r+1:2r)
-    h10BR  = [hBR -gBR⁻¹]
-    hessBB = hessenberg!(gBB⁻¹)
-    Qs     = Matrix([I; spzeros(T, b, 2r)])
-    m1_rr  = Matrix{T}(undef, r, r)
-    m1_nr  = Matrix{T}(undef, n, r)
-    m2_nr  = Matrix{T}(undef, n, r)
-    m1_rn  = Matrix{T}(undef, r, n)
-    m1_nn  = Matrix{T}(undef, n, n)
-    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, ωshifterA, hessBB, h10BR, Qs, atol, m1_rr, m1_nr, m2_nr, m1_rn, m1_nn)
+    B       = Matrix(nullspaceR)                      # nullspace(A0)
+    R       = Matrix(rowspaceR)                       # orthogonal complement of nullspace(h₊)
+    L       = Matrix(rowspaceL)                       # orthogonal complement of nullspace(h₋)
+    hmQ0    = h₋ * parent(rowspaceR)                  # h₋ * [R B] = h₋ * Q0, needed for Jordan chain
+    n       = size(h₀, 2)
+    r       = size(R, 2)
+    l       = size(L, 2)
+    b       = size(B, 2)
+    T       = eltype(h₀)
+    h₊R     = h₊*R
+    hRR     = R'*h₊R
+    hBR     = B'*h₊R
+    hLR     = L'*h₊R
+    gRR⁻¹   = - R'*h₀*R
+    gBB⁻¹   = - B'*h₀*B
+    gRB⁻¹   = - R'*h₀*B
+    gBR⁻¹   = gRB⁻¹'
+    g0⁻¹    = Matrix(-h₀)
+    Adef    = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
+    Bdef    = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
+    Ablock  = Matrix([0I I spzeros(r, b); -hRR gRR⁻¹ gRB⁻¹])
+    Bblock  = Matrix([I 0I spzeros(r, b); 0I hRR' hBR'])
+    ωshifter = diag(gRR⁻¹), (r+1:2r, r+1:2r), diag(g0⁻¹)
+    h10BR   = [hBR -gBR⁻¹]
+    hessBB  = hessenberg!(gBB⁻¹)
+    Qs      = Matrix([I; spzeros(T, b, 2r)])
+    tmp     = DeflatorWorkspace{T}(n, r, l)
+    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, ωshifter, hessBB, h10BR, Qs, g0⁻¹, atol, tmp)
 end
 
 ## Tools
 
 function shiftω!(d::Deflator, ω)
-    diagRR, rowcolA = d.ωshifterA
+    diagRR, rowcolA, diagg0⁻¹ = d.ωshifter
     for (v, row, col) in zip(diagRR, rowcolA...)
         d.Ablock[row, col] = ω + v
+    end
+    for (n, v) in enumerate(diagg0⁻¹)
+        d.ig0[n, n] = ω + v
     end
     return d
 end
@@ -292,11 +303,8 @@ rowspace_qr(mat, atol) = first(fullrank_decomposition_qr(mat, atol))
 ## Deflate
 
 function deflate(d::Deflator{T,<:SparseMatrixCSC}, ω) where {T}
-    # shift diagonal of appropriate subblocks of Ablock and Vblock´
-    shiftω!(d, ω)
     # nullspace is the 2r+b × 2r nullspace Qs of [-h1BR gBR⁻¹ gBB⁻¹] (which is b × 2r+b)
-    hessBB = d.hessBB
-    b = size(hessBB, 1)
+    b = size(d.hessBB, 1)
     r = size(d.h10BR, 2) ÷ 2
     Qs = d.Qs
     Q1  = view(Qs, 1:r, :)
@@ -350,35 +358,31 @@ nondeflated_selfenergy(::Type{Val{:RL}}, s, sch) =
 (s::Schur1DGreensSolver{<:Deflator})(ω, ::Type{Val{:RL}}) =
     deflated_selfenergy(s.deflatorR, s, ω), deflated_selfenergy(s.deflatorL, s, ω)
 
-function deflated_selfenergy(deflator::Deflator{T,M}, s::Schur1DGreensSolver, ω) where {T,M}
-    A, B, Q1, Q2 = deflate(deflator, ω)
+function deflated_selfenergy(d::Deflator{T,M}, s::Schur1DGreensSolver, ω) where {T,M}
+    shiftω!(d, ω)
+    A, B, Q1, Q2 = deflate(d, ω)
     # find right-moving eigenvectors with atol < |λ| < 1
     sch = schur!(A, B)
-    rmodes = retarded_modes(sch, deflator.atol)
+    rmodes = retarded_modes(sch, d.atol)
     nr = sum(rmodes)
     ordschur!(sch, rmodes)
     Zret = view(sch.Z, :, 1:nr)
-    R, h₋Q0 = deflator.R, deflator.hmQ0
+    R, h₋Q0 = d.R, d.hmQ0
     # Qs = [Q1; Q2]; [φR; χR; χB] = Qs * Zret * R11
     # R'φ = φR = R'Z11 * R11, where R'Z11 = Q1 * Zret
     # Q0'*χ = Q0'*φ*Λ = [χR; χB]
     # h₋χ = h₋ * Q0 * [χR; χB] = h₋ * Q0 * Q2 * Zret * R11 = Z21 * R11, where Z21 = h₋ * Q0 * Q2 * Zret
     # R´Z11 = Q1 * Zret
     # Z21   = h₋Q0 * Q2 * Zret
-    R´Z11 = mul!(deflator.m1_rr, Q1, Zret)
-    Z21   = mul!(deflator.m1_nr, h₋Q0, mul!(deflator.m2_nr, Q2, Zret))
+    R´Z11 = mul!(d.tmp.rr, Q1, Zret)
+    Z21   = mul!(d.tmp.nr, h₋Q0, mul!(d.tmp.nr2, Q2, Zret))
 
-    R´source, target = R´Z11, Z21
     # # add generalized eigenvectors until we span the full R space
-    # R´source, target = add_jordan_chain(deflator, ω*I - s.h0, R´Z11, Z21)
+    R´source, target = add_jordan_chain(d, d.ig0, R´Z11, Z21)
 
     # ΣR = M(target * (R´source \ R'))
-    # R´ = copy!(deflator.m1_rn, R')
-    # ΣR = mul!(deflator.m1_nn, target, ldiv!(lu!(R´source), R´))
-    ΣR = mul!(deflator.m1_nn, rdiv!(target, lu!(R´source)), R')
-
-    # # # # @show size(R´source), cond(R´source)
-    # # # @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
+    ΣR = mul!(d.tmp.nn, rdiv!(target, lu!(R´source)), R')
+    # @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
 
     return ΣR
 end
@@ -393,12 +397,12 @@ end
 
 function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
     local ΣRR, R´φg_candidates, source_rowspace
-    g0⁻¹ = integrate_out_bulk(A1, d)
+    G0 = d.tmp.ss
+    g0⁻¹ = integrate_out_bulk!(G0, A1, d)
     h₊ = d.hLR
     h₋ = h₊'
     iL, iR = idsLR(d)
     Σ = zero(g0⁻¹)
-    G0 = inv(g0⁻¹)
     GLLh₊ = view(G0, iL, iL) * h₊
     GRLh₊ = view(G0, iR, iL) * h₊
     R´source = similar(R´Z11, size(R´Z11, 1), 0)
@@ -423,11 +427,28 @@ function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
     return copy(R´source), target
 end
 
-function integrate_out_bulk(A1, deflator)
-    L, R = deflator.L, deflator.R
+function integrate_out_bulk(A1, d::Deflator)
+    L, R = d.L, d.R
     luA1 = lu(A1)
     iA1R, iA1L = luA1 \ R, luA1 \ L
-    g0⁻¹ = inv([L'*iA1L L'*iA1R; R'*iA1L R'*iA1R])
+    g0 = [L'*iA1L L'*iA1R; R'*iA1L R'*iA1R]
+    g0⁻¹ = inv(g0)
+    return g0⁻¹
+end
+
+function integrate_out_bulk!(g0, A1, d::Deflator)
+    L, R = d.L, d.R
+    # iA1R, iA1L = A1 \ R, A1 \ L
+    luA1 = lu!(A1)
+    iA1R = ldiv!(luA1, copy!(d.tmp.nr2, R))
+    iA1L = ldiv!(luA1, copy!(d.tmp.nl, L))
+    l, r = size(L, 2), size(R, 2)
+    i1, i2 = 1:l, l+1:l+r
+    @views mul!(g0[i1, i1], L', iA1L)
+    @views mul!(g0[i2, i1], L', iA1R)
+    @views mul!(g0[i1, i2], R', iA1L)
+    @views mul!(g0[i2, i2], R', iA1R)
+    g0⁻¹ = inv(g0)
     return g0⁻¹
 end
 
