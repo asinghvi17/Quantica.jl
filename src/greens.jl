@@ -165,6 +165,9 @@ struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S,H}
     h10BR::Matrix{T}    # [hBR -gBR⁻¹]
     Qs::Matrix{T}       # [Q1; Q2] = [I 0; 0 I; gBB*h10BR]
     atol::R             # A0, A2 deflation tolerance
+    m1_rr::Matrix{T}
+    m1_nr::Matrix{T}
+    m2_nr::Matrix{T}
 end
 
 struct Schur1DGreensSolver{D<:Union{Deflator,Missing},M} <: AbstractGreensSolver
@@ -239,7 +242,10 @@ function Deflator(atol::Real, h₊::M, h₀::M, h₋::M) where {M}
     h10BR  = [hBR -gBR⁻¹]
     hessBB = hessenberg!(gBB⁻¹)
     Qs     = Matrix([I; spzeros(T, b, 2r)])
-    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, ωshifterA, hessBB, h10BR, Qs, atol)
+    m1_rr  = Matrix{T}(undef, r, r)
+    m1_nr  = Matrix{T}(undef, n, r)
+    m2_nr  = Matrix{T}(undef, n, r)
+    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, ωshifterA, hessBB, h10BR, Qs, atol, m1_rr, m1_nr, m2_nr)
 end
 
 ## Tools
@@ -353,18 +359,21 @@ function deflated_selfenergy(deflator::Deflator{T,M}, s::Schur1DGreensSolver, ω
     # R'φ = φR = R'Z11 * R11, where R'Z11 = Q1 * Zret
     # Q0'*χ = Q0'*φ*Λ = [χR; χB]
     # h₋χ = h₋ * Q0 * [χR; χB] = h₋ * Q0 * Q2 * Zret * R11 = Z21 * R11, where Z21 = h₋ * Q0 * Q2 * Zret
-    R´Z11 = Q1 * Zret
-    Z21   = h₋Q0 * Q2 * Zret
-    # R´source, target = R´Z11, Z21
-    # add generalized eigenvectors until we span the full R space
-    R´source, target = add_jordan_chain(deflator, ω*I - s.h0, R´Z11, Z21)
+    # R´Z11 = Q1 * Zret
+    # Z21   = h₋Q0 * Q2 * Zret
+    R´Z11 = mul!(deflator.m1_rr, Q1, Zret)
+    Z21   = mul!(deflator.m1_nr, h₋Q0, mul!(deflator.m2_nr, Q2, Zret))
 
-    ΣR = M(target * (R´source \ R'))
+    # # R´source, target = R´Z11, Z21
+    # # add generalized eigenvectors until we span the full R space
+    # R´source, target = add_jordan_chain(deflator, ω*I - s.h0, R´Z11, Z21)
 
-    # # # @show size(R´source), cond(R´source)
-    # # @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
+    # ΣR = M(target * (R´source \ R'))
 
-    return ΣR
+    # # # # @show size(R´source), cond(R´source)
+    # # # @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
+
+    # return ΣR
 end
 
 # need this barrier for type-stability (sch.α and sch.β are finicky)
