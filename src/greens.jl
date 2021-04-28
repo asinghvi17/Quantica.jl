@@ -157,12 +157,11 @@ struct DeflatorWorkspace{T}
     ss::Matrix{T}
     nn::Matrix{T}
     nr::Matrix{T}
-    nr2::Matrix{T}
     rr::Matrix{T}
 end
 
 DeflatorWorkspace{T}(n, r, l) where {T} =
-    DeflatorWorkspace(Matrix{T}.(undef, ((n,l), (l+r, l+r), (n, n), (n, r), (n, r), (r, r)))...)
+    DeflatorWorkspace(Matrix{T}.(undef, ((n,l), (l+r, l+r), (n, n), (n, r), (r, r)))...)
 
 struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S,H}
     hmQ0::M             # h₋*Q0 where Q0 = [rowspace(A0) nullspace(A0)]. h₊ = [R' 0] Q0'. h₋ = Q0 [R; 0]
@@ -374,11 +373,11 @@ function deflated_selfenergy(d::Deflator{T,M}, s::Schur1DGreensSolver, ω) where
     ## h₋χ   = h₋ * Q0 * [χR; χB] = h₋ * Q0 * Q2 * Zret * R11 = Z21 * R11, where Z21 = h₋ * Q0 * Q2 * Zret
     ## R´Z11 = Q1 * Zret
     ## Z21   = h₋Q0 * Q2 * Zret
-    R´Z11 = mul!(d.tmp.rr, Q1, Zret)
-    Z21   = mul!(d.tmp.nr, h₋Q0, mul!(d.tmp.nr2, Q2, Zret))
+    R´Z11 = Q1 * Zret
+    Z21 = h₋Q0 * Q2 * Zret
 
     ## add generalized eigenvectors until we span the full R space
-    R´source, target = add_jordan_chain(d, d.ig0, R´Z11, Z21)
+    R´source, target = add_jordan_chain(d, R´Z11, Z21)
     # R´source, target = R´Z11, Z21
 
     # ΣR = M(target * (R´source \ R'))
@@ -395,11 +394,12 @@ function retarded_modes(sch, atol)
     return rmodes
 end
 
-
-function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
+function add_jordan_chain(d::Deflator, R´Z11, Z21)
     local ΣRR, R´φg_candidates, source_rowspace
     G0 = d.tmp.ss
-    g0⁻¹ = integrate_out_bulk!(G0, A1, d)
+    g0⁻¹ = integrate_out_bulk!(G0, d)
+    # g0⁻¹ = integrate_out_bulk(d)
+    # G0 = inv(g0⁻¹)
     h₊ = d.hLR
     h₋ = h₊'
     iL, iR = idsLR(d)
@@ -425,29 +425,32 @@ function add_jordan_chain(d::Deflator, A1, R´Z11, Z21)
     end
     φgJ_candidates = d.R * ΣRR * R´φg_candidates
     target = [Z21 φgJ_candidates] * source_rowspace
+    # R´source is an Adjoint, must covert to do lu! later
     return copy(R´source), target
 end
 
-function integrate_out_bulk(A1, d::Deflator)
-    L, R = d.L, d.R
-    luA1 = lu(A1)
-    iA1R, iA1L = luA1 \ R, luA1 \ L
-    g0 = [L'*iA1L L'*iA1R; R'*iA1L R'*iA1R]
-    g0⁻¹ = inv(g0)
-    return g0⁻¹
-end
+# function integrate_out_bulk(d::Deflator)
+#     L, R = d.L, d.R
+#     A1 = copy!(d.tmp.nn, d.ig0)
+#     luA1 = lu!(A1)
+#     iA1R, iA1L = luA1 \ R, luA1 \ L
+#     g0 = [L'*iA1L L'*iA1R; R'*iA1L R'*iA1R]
+#     g0⁻¹ = inv(g0)
+#     return g0⁻¹
+# end
 
-function integrate_out_bulk!(g0, A1, d::Deflator)
+function integrate_out_bulk!(g0, d::Deflator)
     L, R = d.L, d.R
+    A1 = copy!(d.tmp.nn, d.ig0)
     # iA1R, iA1L = A1 \ R, A1 \ L
-    luA1 = lu!(A1)
-    iA1R = ldiv!(luA1, copy!(d.tmp.nr2, R))
+    luA1 = lu(A1)
+    iA1R = ldiv!(luA1, copy!(d.tmp.nr, R))
     iA1L = ldiv!(luA1, copy!(d.tmp.nl, L))
     l, r = size(L, 2), size(R, 2)
     i1, i2 = 1:l, l+1:l+r
     @views mul!(g0[i1, i1], L', iA1L)
-    @views mul!(g0[i2, i1], L', iA1R)
-    @views mul!(g0[i1, i2], R', iA1L)
+    @views mul!(g0[i1, i2], L', iA1R)
+    @views mul!(g0[i2, i1], R', iA1L)
     @views mul!(g0[i2, i2], R', iA1R)
     g0⁻¹ = inv(g0)
     return g0⁻¹
