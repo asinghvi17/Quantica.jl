@@ -176,15 +176,16 @@ struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S,H}
     hessBB::H           # hessenberg(gBB⁻¹)
     h10BR::Matrix{T}    # [hBR -gBR⁻¹]
     Qs::Matrix{T}       # [Q1; Q2] = [I 0; 0 I; gBB*h10BR]
-    ig0::Matrix{T}      # Matrix(-h₀)
     atol::R             # A0, A2 deflation tolerance
     tmp::DeflatorWorkspace{T}
 end
 
-struct Schur1DGreensSolver{D<:Union{Deflator,Missing},M} <: AbstractGreensSolver
+struct Schur1DGreensSolver{D<:Union{Deflator,Missing},T,M<:AbstractMatrix{T}} <: AbstractGreensSolver
     h0::M
     hp::M
     hm::M
+    ig0::Matrix{T}      # Matrix(-h₀)
+    ωshifter::Vector{T} # diag(ig0) metadata to aid in ω-shifting ig0
     deflatorR::D
     deflatorL::D
 end
@@ -216,12 +217,14 @@ function greensolver(s::Schur1D, h)
     maxdn = max(1, maximum(har -> abs(first(har.dn)), h.harmonics))
     H = flatten(maxdn == 1 ? h : unitcell(h, (maxdn,)))
     h₊, h₀, h₋ = H[(1,)], H[(0,)], H[(-1,)]
+    g0⁻¹ = Matrix(-h₀)
+    ωshifter = diag(g0⁻¹)
     n = size(H, 1)
     T = complex(blockeltype(H))
     atol = s.atol === missing ? default_tol(T) : s.atol
     deflatorR = Deflator(atol, h₊, h₀, h₋)
     deflatorL = Deflator(atol, h₋, h₀, h₊)
-    return Schur1DGreensSolver(h₀, h₊, h₋, deflatorR, deflatorL)
+    return Schur1DGreensSolver(h₀, h₊, h₋, g0⁻¹, ωshifter, deflatorR, deflatorL)
 end
 
 Deflator(atol::Nothing, As...) = missing
@@ -246,30 +249,29 @@ function Deflator(atol::Real, h₊::M, h₀::M, h₋::M) where {M}
     gBB⁻¹   = - B'*h₀*B
     gRB⁻¹   = - R'*h₀*B
     gBR⁻¹   = gRB⁻¹'
-    g0⁻¹    = Matrix(-h₀)
     Adef    = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
     Bdef    = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
     Ablock  = Matrix([0I I spzeros(r, b); -hRR gRR⁻¹ gRB⁻¹])
     Bblock  = Matrix([I 0I spzeros(r, b); 0I hRR' hBR'])
-    ωshifter = diag(gRR⁻¹), (r+1:2r, r+1:2r), diag(g0⁻¹)
+    ωshifter = diag(gRR⁻¹), (r+1:2r, r+1:2r)
     h10BR   = [hBR -gBR⁻¹]
     hessBB  = hessenberg!(gBB⁻¹)
     Qs      = Matrix([I; spzeros(T, b, 2r)])
     tmp     = DeflatorWorkspace{T}(n, r, l)
-    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, ωshifter, hessBB, h10BR, Qs, g0⁻¹, atol, tmp)
+    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, ωshifter, hessBB, h10BR, Qs, atol, tmp)
 end
 
 ## Tools
 
-function shiftω!(d::Deflator, ω)
-    diagRR, rowcolA, diagg0⁻¹ = d.ωshifter
+function shiftω!(d::Deflator, s, ω)
+    diagRR, rowcolA = d.ωshifter
     for (v, row, col) in zip(diagRR, rowcolA...)
         d.Ablock[row, col] = ω + v
     end
-    for (n, v) in enumerate(diagg0⁻¹)
-        d.ig0[n, n] = ω + v
+    for (n, v) in enumerate(s.ωshifter)
+        s.ig0[n, n] = ω + v
     end
-    return d
+    return nothing
 end
 
 function idsLR(deflator)
@@ -358,7 +360,7 @@ nondeflated_selfenergy(::Type{Val{:RL}}, s, sch) =
     deflated_selfenergy(s.deflatorR, s, ω), deflated_selfenergy(s.deflatorL, s, ω)
 
 function deflated_selfenergy(d::Deflator{T,M}, s::Schur1DGreensSolver, ω) where {T,M}
-    shiftω!(d, ω)
+    shiftω!(d, s, ω)
     A, B, Q1, Q2 = deflate(d, ω)
     # find right-moving eigenvectors with atol < |λ| < 1
     sch = schur!(A, B)
@@ -377,12 +379,13 @@ function deflated_selfenergy(d::Deflator{T,M}, s::Schur1DGreensSolver, ω) where
     Z21 = h₋Q0 * Q2 * Zret
 
     ## add generalized eigenvectors until we span the full R space
-    R´source, target = add_jordan_chain(d, R´Z11, Z21)
+    R´source, target = add_jordan_chain(d, s, R´Z11, Z21)
     # R´source, target = R´Z11, Z21
 
     # ΣR = M(target * (R´source \ R'))
     ΣR = mul!(d.tmp.nn, rdiv!(target, lu!(R´source)), R')
-    # @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
+    # ΣR = target; @show sum(abs.(ΣR - s.hm * (((ω * I - s.h0) - ΣR) \ Matrix(s.hp))))
+    # @show sum(abs.(G⁻¹ - (ω * I - s.h0 - s.hm * (G⁻¹ \ Matrix(s.hp)))))
 
     return ΣR
 end
@@ -394,10 +397,10 @@ function retarded_modes(sch, atol)
     return rmodes
 end
 
-function add_jordan_chain(d::Deflator, R´Z11, Z21)
+function add_jordan_chain(d::Deflator, s, R´Z11, Z21)
     local ΣRR, R´φg_candidates, source_rowspace
     G0 = d.tmp.ss
-    g0⁻¹ = integrate_out_bulk!(G0, d)
+    g0⁻¹ = integrate_out_bulk!(G0, d, s)
     # g0⁻¹ = integrate_out_bulk(d)
     # G0 = inv(g0⁻¹)
     h₊ = d.hLR
@@ -429,9 +432,9 @@ function add_jordan_chain(d::Deflator, R´Z11, Z21)
     return copy(R´source), target
 end
 
-# function integrate_out_bulk(d::Deflator)
+# function integrate_out_bulk(d::Deflator, s)
 #     L, R = d.L, d.R
-#     A1 = copy!(d.tmp.nn, d.ig0)
+#     A1 = copy!(d.tmp.nn, s.ig0)
 #     luA1 = lu!(A1)
 #     iA1R, iA1L = luA1 \ R, luA1 \ L
 #     g0 = [L'*iA1L L'*iA1R; R'*iA1L R'*iA1R]
@@ -439,9 +442,9 @@ end
 #     return g0⁻¹
 # end
 
-function integrate_out_bulk!(g0, d::Deflator)
+function integrate_out_bulk!(g0, d::Deflator, s)
     L, R = d.L, d.R
-    A1 = copy!(d.tmp.nn, d.ig0)
+    A1 = copy!(d.tmp.nn, s.ig0)
     # iA1R, iA1L = A1 \ R, A1 \ L
     luA1 = lu(A1)
     iA1R = ldiv!(luA1, copy!(d.tmp.nr, R))
@@ -500,8 +503,9 @@ dist_to_boundary((src, dst)::Pair, g::GreensFunction{<:Schur1DGreensSolver,1,Tup
 function surface_fastpath(g, ω, (dsrc, ddst); source = all_sources(g))
     dist = ddst - dsrc
     Σ = dsrc > 0 ? g.solver(ω, Val{:R}) : g.solver(ω, Val{:L})
-    h0 = g.solver.h0
-    luG⁻¹ = lu(ω*I - h0 - Σ)
+    G⁻¹ = copy(g.solver.ig0)
+    G⁻¹ .-= Σ
+    luG⁻¹ = lu!(G⁻¹)
     if dist == 0
         G = ldiv!(luG⁻¹, source)
     else
@@ -545,7 +549,6 @@ end
 
 # Semiinifinite: G_{N,M} = (Ghᴺ⁻ᴹ - GhᴺGh⁻ᴹ)G∞_{0}
 function (g::GreensFunction{<:Schur1DGreensSolver,1,Tuple{Int}})(ω, ::Missing)
-    @show 1
     G∞⁻¹, GRh₊, GLh₋ = Gfactors(g.solver, ω)
     return cells -> G_semiinfinite(G∞⁻¹, GRh₊, GLh₋, dist_to_boundary.(cells, Ref(g)))
 end
