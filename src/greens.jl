@@ -98,6 +98,7 @@ Base.eltype(g::GreensFunction) = eltype(g.h)
 #######################################################################
 # Schur1DGreensSolver
 #######################################################################
+using QuadEig: Linearization, pqr, getQ, getRP´, nonzero_rows
 
 """
     Schur1D(; direct = false)
@@ -157,24 +158,19 @@ struct DeflatorWorkspace{T}
     ss::Matrix{T}
     nn::Matrix{T}
     nr::Matrix{T}
-    rr::Matrix{T}
-    mb::Matrix{T}
 end
 
 DeflatorWorkspace{T}(n, r, l) where {T} =
-    DeflatorWorkspace(Matrix{T}.(undef, ((n,l), (l+r, l+r), (n, n), (n, r), (r, r), (n+r, n-r)))...)
+    DeflatorWorkspace(Matrix{T}.(undef, ((n,l), (l+r, l+r), (n, n), (n, r)))...)
 
 struct Deflator{T,M<:AbstractMatrix{T},R<:Real,S}
-    hmQ0::M             # h₋*Q0 where Q0 = [rowspace(A0) nullspace(A0)]. h₊ = [R' 0] Q0'. h₋ = Q0 [R; 0]
     R::Matrix{T}        # A0 = [-hRR 0; -hBR  0] * [R'; B' ]. R = orthogonal complement of nullspace(A0) === rowspace(A0)
     L::Matrix{T}        # A2 = [-hLL 0; -hB´L 0] * [L'; B´']. L = orthogonal complement of nullspace(A2) === rowspace(A2)
     hLR::Matrix{T}      # hLR = L' h₊ R (dense for ldiv! in Jordan recursion)
+    ig0::Matrix{T}      # Matrix(-h₀)
+    lin::Linearization{T,M,R}
     Adef::Matrix{T}     # deflated A
     Bdef::Matrix{T}     # deflated B
-    Ablock::Matrix{T}   # Adef = Ablock * QR; Ablock = [0 I 0; -hRR gRR⁻¹ gRB⁻¹]
-    Bblock::Matrix{T}   # Bdef = Bblock * QR; Bblock = [I 0 0; 0 hRR' hBR']
-    Vblock´::Matrix{T}  # # Vblock = [-hBR gBR⁻¹ gBB⁻¹] = [R 0] [QB'; QR']. Vblock´ = Matrix(Vblock')
-    ig0::Matrix{T}      # Matrix(-h₀)
     ωshifter::S         # metadata to aid in ω-shifting the relevant A subblocks
     atol::R             # A0, A2 deflation tolerance
     tmp::DeflatorWorkspace{T}
@@ -228,44 +224,29 @@ Deflator(atol::Nothing, As...) = missing
 function Deflator(atol::Real, h₊::M, h₀::M, h₋::M) where {M}
     rowspaceR, _, nullspaceR = fullrank_decomposition_qr(h₊, atol)
     rowspaceL, _, _ = fullrank_decomposition_qr(h₋, atol)
-    B       = Matrix(nullspaceR)                      # nullspace(A0)
-    R       = Matrix(rowspaceR)                       # orthogonal complement of nullspace(h₊)
-    L       = Matrix(rowspaceL)                       # orthogonal complement of nullspace(h₋)
-    hmQ0    = h₋ * parent(rowspaceR)                  # h₋ * [R B] = h₋ * Q0, needed for Jordan chain
-    n       = size(h₀, 2)
-    r       = size(R, 2)
-    l       = size(L, 2)
-    b       = size(B, 2)
-    T       = eltype(h₀)
-    h₊R     = h₊*R
-    hRR     = R'*h₊R
-    hBR     = B'*h₊R
-    hLR     = L'*h₊R
-    gRR⁻¹   = - R'*h₀*R
-    gBB⁻¹   = - B'*h₀*B
-    gRB⁻¹   = - R'*h₀*B
-    gBR⁻¹   = gRB⁻¹'
-    g0⁻¹    = Matrix(-h₀)
-    Adef    = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
-    Bdef    = Matrix{T}(undef, 2r, 2r)       # Needs to be dense for schur!(Adef, Bdef)
-    Ablock  = Matrix([0I I spzeros(r, b); -hRR gRR⁻¹ gRB⁻¹])
-    Bblock  = Matrix([I 0I spzeros(r, b); 0I hRR' hBR'])
-    Vblock´ = Matrix([-hBR gBR⁻¹ gBB⁻¹]')
-    ωshifter = diag(gRR⁻¹), (r+1:2r, r+1:2r), diag(gBB⁻¹), (2r+1:2r+b, 1:b), diag(g0⁻¹)
-    tmp     = DeflatorWorkspace{T}(n, r, l)
-    return Deflator(hmQ0, R, L, hLR, Adef, Bdef, Ablock, Bblock, Vblock´, g0⁻¹, ωshifter, atol, tmp)
+    R    = Matrix(rowspaceR)                 # orthogonal complement of nullspace(h₊)
+    L    = Matrix(rowspaceL)                 # orthogonal complement of nullspace(h₋)
+    n    = size(h₀, 2)
+    r    = size(R, 2)
+    l    = size(L, 2)
+    T    = eltype(h₀)
+    hLR  = L'*h₊*R
+    g0⁻¹ = Matrix(-h₀)
+    Adef = Matrix{T}(undef, 2r, 2r)          # Needs to be dense for schur!(Adef, Bdef)
+    Bdef = Matrix{T}(undef, 2r, 2r)          # Needs to be dense for schur!(Adef, Bdef)
+    lin  = linearize(-h₋, -h₀, -h₊; atol)    # C4(A0, A1, A2) = C2(A2, A1, A1) = C2(-h₋, -h₀, -h₊)
+    QIV  = lin.Q * [I(n) 0I; 0I 0I] * lin.V  # We shift Aω0 before deflating by -ω*QIV to turn -h0 into ω - h0
+    Aω0  = copy(lin.A)                       # store the ω=0 matrix A to be able to update l
+    ωshifter = Aω0, QIV, diag(g0⁻¹)
+    tmp = DeflatorWorkspace{T}(n, r, l)
+    return Deflator(R, L, hLR, g0⁻¹, lin, Adef, Bdef, ωshifter, atol, tmp)
 end
 
 ## Tools
 
 function shiftω!(d::Deflator, ω)
-    diagRR, rowcolA, diagBB, rowcolV, diagg0⁻¹ = d.ωshifter
-    for (v, row, col) in zip(diagRR, rowcolA...)
-        d.Ablock[row, col] = ω + v
-    end
-    for (v, row, col) in zip(diagBB, rowcolV...)
-        d.Vblock´[row, col] = conj(ω) + v
-    end
+    Aω0, QIV, diagg0⁻¹ = d.ωshifter
+    d.lin.A .= Aω0 .+ ω .* QIV
     for (n, v) in enumerate(diagg0⁻¹)
         d.ig0[n, n] = ω + v
     end
@@ -277,6 +258,15 @@ function shiftω!(mat::AbstractMatrix, ω)
         mat[i, i] += ω
     end
     return mat
+end
+
+function get_C4_ABQ(C4lin::Linearization, deflator::Deflator)
+    A = copy!(deflator.Adef, C4lin.B)
+    B = copy!(deflator.Bdef, C4lin.A)
+    n = size(C4lin.V, 1) ÷ 2
+    Q1 = view(C4lin.V, 1:n, :)
+    Q2 = view(C4lin.V, n+1:2n, :)
+    return A, B, Q1, Q2
 end
 
 function idsLR(deflator)
@@ -305,24 +295,6 @@ end
 nullspace_qr(mat, atol) = last(fullrank_decomposition_qr(mat, atol))
 
 rowspace_qr(mat, atol) = first(fullrank_decomposition_qr(mat, atol))
-
-## Deflate
-
-function deflate(d::Deflator{T,<:SparseMatrixCSC}, ω) where {T}
-    # shift diagonal of appropriate subblocks of Ablock and Vblock´
-    shiftω!(d, ω)
-    r = size(d.R, 2)
-    m = size(d.Vblock´, 1)  # m = 2r+b
-    # Vblock´ = [RP´ 0] * Q' = b × 2r+b; Q = [rowspaceV nullspaceV] = 2r+b × 2r+b = m × m
-    # nullspaceV is 2r+b × 2r
-    Vblock´ = copy!(d.tmp.mb, d.Vblock´)  # ::Matrix{T}
-    nullspaceV = getQ(qr!(Vblock´, Val(true)), m-2r+1:m)
-    Adef = mul!(d.Adef, d.Ablock, nullspaceV)
-    Bdef = mul!(d.Bdef, d.Bblock, nullspaceV)
-    Q1 = view(nullspaceV, 1:r, :)
-    Q2 = view(nullspaceV, r+1:m, :)
-    return Adef, Bdef, Q1, Q2
-end
 
 ## Solver execution: compute self-energy, with or without deflation
 (s::Schur1DGreensSolver)(ω) = s(ω, Val{:R})
@@ -368,22 +340,20 @@ nondeflated_selfenergy(::Type{Val{:RL}}, s, sch) =
 
 function deflated_selfenergy(d::Deflator{T,M}, s::Schur1DGreensSolver, ω) where {T,M}
     shiftω!(d, ω)
-    A, B, Q1, Q2 = deflate(d, ω)
+    r = size(d.Adef, 1) ÷ 2
+    deflated = deflate(d.lin; atol = d.atol, force_deflation_size = r)
+    A, B, Q1, Q2 = get_C4_ABQ(deflated, d)
     # find right-moving eigenvectors with atol < |λ| < 1
     sch = schur!(A, B)
     rmodes = retarded_modes(sch, d.atol)
     nr = sum(rmodes)
     ordschur!(sch, rmodes)
     Zret = view(sch.Z, :, 1:nr)
-    R, h₋Q0 = d.R, d.hmQ0
-    ## Qs    = [Q1; Q2]; [φR; χR; χB] = Qs * Zret * R11
-    ## R'φ   = φR = R'Z11 * R11, where R'Z11 = Q1 * Zret
-    ## Q0'*χ = Q0'*φ*Λ = [χR; χB]
-    ## h₋χ   = h₋ * Q0 * [χR; χB] = h₋ * Q0 * Q2 * Zret * R11 = Z21 * R11, where Z21 = h₋ * Q0 * Q2 * Zret
-    ## R´Z11 = Q1 * Zret
-    ## Z21   = h₋Q0 * Q2 * Zret
-    R´Z11 = Q1 * Zret
-    Z21 = h₋Q0 * Q2 * Zret
+    R = d.R
+    ## φ     = Z11 * R11, where Z11 = Q1 * Zret
+    ## h₋φλ  = Z21 * R11, where Z21 = Q2 * Zret
+    R´Z11 = R' * Q1 * Zret
+    Z21 = Q2 * Zret
 
     ## add generalized eigenvectors until we span the full R space
     R´source, target = add_jordan_chain(d, R´Z11, Z21)
@@ -438,6 +408,7 @@ function add_jordan_chain(d::Deflator, R´Z11, Z21)
     return copy(R´source), target
 end
 
+## Slower but clearer version
 # function integrate_out_bulk(d::Deflator)
 #     L, R = d.L, d.R
 #     A1 = copy!(d.tmp.nn, d.ig0)
