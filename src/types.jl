@@ -1382,7 +1382,7 @@ end
 
 struct Bandstructure{T,E,L,B} # E = L+1
     subbands::Vector{Subband{T,E}}
-    solvers::Vector{AppliedEigenSolver{T,L}}  # one per Julia thread
+    solvers::Channel{AppliedEigenSolver{T,L}}  # typically one per Julia thread
     blockstruct::OrbitalBlockStructure{B}
 end
 

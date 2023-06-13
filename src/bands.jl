@@ -62,31 +62,35 @@ end
 bands(h, rng, rngs...; kw...) = bands(h, mesh(rng, rngs...); kw...)
 
 function bands(h::AbstractHamiltonian, mesh::Mesh{S};
-         solver = ES.LinearAlgebra(), transform = missing, mapping = missing, kw...) where {S}
-    solvers = eigensolvers_per_threads(solver, h, S, mapping, transform)
+         solver = ES.LinearAlgebra(), transform = missing, mapping = missing, nsolvers = Threads.nthreads(), kw...) where {S}
+    solvers = eigensolver_pool(nsolvers, solver, h, S, mapping, transform)
     ss = subbands(solvers, mesh; kw...)
     os = blockstructure(h)
     return Bandstructure(ss, solvers, os)
 end
 
 function bands(h::Function, mesh::Mesh{S};
-         solver = ES.LinearAlgebra(), transform = missing, mapping = missing, kw...) where {S}
-    solvers = eigensolvers_per_threads(solver, h, S, mapping, transform)
+         solver = ES.LinearAlgebra(), transform = missing, mapping = missing, nsolvers = Threads.nthreads(), kw...) where {S}
+    solvers = eigensolver_pool(nsolvers, solver, h, S, mapping, transform)
     ss = subbands(solvers, mesh; kw...)
     return ss
 end
 
-function eigensolvers_per_threads(solver, h, S, mapping, transform)
+function eigensolver_pool(poolsize, solver, h::AbstractHamiltonian{T,<:Any,L}, S, mapping, transform) where {T,L}
     mapping´ = sanitize_mapping(mapping, h)
-    asolvers = [apply(solver, h, S, mapping´, transform) for _ in 1:Threads.nthreads()]
-    return asolvers
+    pool = Channel{AppliedEigenSolver{T,L}}(poolsize)
+    for _ in 1:poolsize
+        asolver = apply(solver, h, S, mapping´, transform)
+        put!(pool, asolver)
+    end
+    return pool
 end
 
 function subbands(solvers, basemesh::Mesh{SVector{L,T}};
-         showprogress = true, defects = (), patches = 0, degtol = missing, split = true, warn = true) where {T,L}
+         showprogress = true, defects = (), patches = 0, degtol = missing, split = true, warn = true, ntasks = 2 * Threads.nthreads()) where {T,L}
     defects´ = sanitize_Vector_of_SVectors(SVector{L,T}, defects)
     degtol´ = degtol isa Number ? degtol : sqrt(eps(real(T)))
-    subbands = subbands_precompilable(solvers, basemesh, showprogress, defects´, patches, degtol´, split, warn)
+    subbands = subbands_precompilable(solvers, basemesh, showprogress, defects´, patches, degtol´, split, warn, ntasks)
     return subbands
 end
 
@@ -104,8 +108,8 @@ sanitize_mapping((xs, nodes)::Pair, ::Val{L}) where {L} =
 sanitize_mapping((xs, nodes)::Pair{X,S}, ::Val{L}) where {N,L,T,X<:NTuple{N,Real},S<:NTuple{N,SVector{L,T}}} =
     polygonpath(xs, nodes)
 
-function subbands_precompilable(solvers::Vector{A}, basemesh::Mesh{SVector{L,T}},
-    showprogress, defects, patches, degtol, split, warn) where {T,L,A<:AppliedEigenSolver{T,L}}
+function subbands_precompilable(solvers::Channel{A}, basemesh::Mesh{SVector{L,T}},
+    showprogress, defects, patches, degtol, split, warn, ntasks) where {T,L,A<:AppliedEigenSolver{T,L}}
 
     basemesh = copy(basemesh) # will become part of Band, possibly refined
     eigens = Vector{EigenComplex{T}}(undef, length(vertices(basemesh)))
@@ -117,7 +121,7 @@ function subbands_precompilable(solvers::Vector{A}, basemesh::Mesh{SVector{L,T}}
     frustrated = similar(crossed)
     subbands = Subband{T,L+1}[]
     data = (; basemesh, eigens, bandverts, bandneighs, bandneideg, coloffsets, solvers, L,
-              crossed, frustrated, subbands, defects, patches, showprogress, degtol, split, warn)
+              crossed, frustrated, subbands, defects, patches, showprogress, degtol, split, warn, ntasks)
 
     # Step 1 - Diagonalize:
     # Uses multiple SpectrumSolvers (one per Julia thread) to diagonalize h at each
@@ -230,12 +234,20 @@ function subbands_diagonalize!(data)
     baseverts = vertices(data.basemesh)
     meter = Progress(length(baseverts), "Step 1 - Diagonalizing: ")
     push!(data.coloffsets, 0) # first element
-    Threads.@threads :static for i in eachindex(baseverts)
-        vert = baseverts[i]
-        solver = data.solvers[Threads.threadid()]
-        data.eigens[i] = solver(vert)
-        data.showprogress && ProgressMeter.next!(meter)
-    end
+    chunk_size = max(1, length(baseverts) ÷ data.ntasks)
+	basechunks = Iterators.partition(baseverts, chunk_size)
+	tasks = map(basechunks) do basechunk
+		Threads.@spawn begin
+			solver = take!(data.solvers)
+			results = map(basechunk) do vert
+                data.showprogress && ProgressMeter.next!(meter)
+                return solver(vert)
+            end
+			put!(data.solvers, solver)
+            return results
+		end
+	end
+	copyto!(data.eigens, Iterators.flatten(fetch.(tasks)))
     # Collect band vertices and store column offsets
     for (basevert, eigen) in zip(baseverts, data.eigens)
         append_bands_column!(data, basevert, eigen)
