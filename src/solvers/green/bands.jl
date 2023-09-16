@@ -125,14 +125,12 @@ shiftpad(s::SVector{N,T}, i) where {N,T} =
 # BandSimplex: encodes energy and momenta of vertices, and derived quantitities
 #region
 
-struct BandSimplex{D,T,S1,S2,S3,SU<:SMatrix{D,D,T}}     # D = manifold dimension
+struct BandSimplex{D,T,S1,S2<:SMatrix{<:Any,D,T},S3}     # D = manifold dimension
     ei::S1        # eᵢ::SVector{D´,T} = energy of vertex i
     kij::S2       # kᵢ[j]::SMatrix{D´,D,T,DD´} = coordinate j of momentum for vertex i
     eij::S3       # ϵᵢʲ::SMatrix{D´,D´,T,D´D´} = e_j - e_i
-    U⁻¹::SU       # inv(Uᵢⱼ) for Uᵢⱼ::SMatrix{D,D,T,DD} = kⱼ[i] - k₀[i] (edges as cols)
-    phi´::S1      # first hyperdual coefficient of φ
-    w::SVector{D,T} # U⁻¹ * k₀
-    VD::T         # D!V = |det(U)|
+    dual::S1      # first hyperdual coefficient
+    VD::T         # D!V = |det(hcat(kᵢ - k₀))|
 end
 
 function BandSimplex(es::NTuple{<:Any,Number}, ks::NTuple{<:Any,SVector})
@@ -147,24 +145,22 @@ function BandSimplex(ei::SVector{D´}, kij::SMatrix{D´,D,T}) where {D´,D,T}
     eij = chop(ei' .- ei)
     k0 = kij[1, :]
     U = kij[SVector{D}(2:D´),:]' .- k0          # edges as columns
-    U⁻¹ = inv(U)
     VD = abs(det(U))
-    w = U⁻¹ * k0
-    phi´ = generate_phi´(eij)
-    return BandSimplex(ei, kij, eij, U⁻¹, phi´, w, VD)
+    dual = generate_dual(eij)
+    return BandSimplex(ei, kij, eij, dual, VD)
 end
 
-function generate_phi´(eij::SMatrix{D´,D´,T}) where {D´,T}
-    phi´ = rand(SVector{D´,T})
-    iszero(eij) && return phi´
-    while !is_valid_phi´(phi´, eij)
-        phi´ = rand(SVector{D´,T})
+function generate_dual(eij::SMatrix{D´,D´,T}) where {D´,T}
+    dual = rand(SVector{D´,T})
+    iszero(eij) && return dual
+    while !is_valid_dual(dual, eij)
+        dual = rand(SVector{D´,T})
     end
-    return phi´
+    return dual
 end
 
 # check whether iszero(eʲₖφʲₗ - φʲₖeʲₗ) for nonzero e's
-function is_valid_phi´(phi, es)
+function is_valid_dual(phi, es)
     phis = phi' .- phi
     for j in axes(es, 2), k in axes(es, 1), l in axes(es, 1)
         l != k != j && l != k || continue
@@ -198,7 +194,33 @@ end
 #endregion
 
 ############################################################################################
-# g_integrals_nonlocal: g₀(ω) and gⱼ(ω) with normal or hyperdual numbers for φ
+# g_integrals_local: zero-dn g₀(ω) and gⱼ(ω) with normal or hyperdual numbers for φ
+#region
+
+function g_integrals_local(s::BandSimplex{D,T}, ω, ::Val{N} = Val(0)) where {D,T,N}
+    eₖʲ = s.eij
+    g0, gj = begin
+        if N > 0 || is_degenerate(eₖʲ)
+            # phases ϕⱼ[j+1] will be perturbed by ϕⱼ´[j+1]*dϕ, for j in 0:D
+            # Similartly, ϕₖʲ[j+1,k+1] will be perturbed by ϕₖʲ´[j+1,k+1]*dϕ
+            ϕⱼ´ = s.dual
+            order = ifelse(N > 0, N, D+1)
+            ϕⱼseries = Series{order}.(ϕⱼ, ϕⱼ´)
+            ex = Expansions(Val(order-1), T)
+            g_integrals_nonlocal_ϕ(s, ω, ϕⱼseries, ex)
+        else
+            g_integrals_nonlocal_ϕ(s, ω, ϕⱼ, missing)
+        end
+    end
+    return g0, gj
+end
+
+is_degenerate(eₖʲ) = any(iszero, eₖʲ)
+
+#endregion
+
+############################################################################################
+# g_integrals_nonlocal: finite-dn g₀(ω) and gⱼ(ω) with normal or hyperdual numbers for φ
 #region
 
 struct Expansions{N,TC<:NTuple{N},TJ,SJ}
@@ -227,7 +249,7 @@ function g_integrals_nonlocal(s::BandSimplex{D,T}, ω, dn, ::Val{N} = Val(0)) wh
         if N > 0 || is_degenerate(ϕₖʲ, eₖʲ)
             # phases ϕⱼ[j+1] will be perturbed by ϕⱼ´[j+1]*dϕ, for j in 0:D
             # Similartly, ϕₖʲ[j+1,k+1] will be perturbed by ϕₖʲ´[j+1,k+1]*dϕ
-            ϕⱼ´ = s.phi´
+            ϕⱼ´ = s.dual
             order = ifelse(N > 0, N, D+1)
             ϕⱼseries = Series{order}.(ϕⱼ, ϕⱼ´)
             ex = Expansions(Val(order-1), T)
