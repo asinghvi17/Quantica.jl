@@ -27,9 +27,9 @@ default_green_solver(::AbstractHamiltonian) = GS.Bands()
 
 ## TODO: test copy(g) for potential aliasing problems
 (g::GreenFunction)(; params...) = minimal_callsafe_copy(call!(g; params...))
-(g::GreenFunction)(ω; params...) = minimal_callsafe_copy(call!(g, ω; params...))
+(g::GreenFunction)(ω; params...) = minimal_callsafe_copy(call!(g, ω; ω_internal = ω, params...))
 (g::GreenSlice)(; params...) = minimal_callsafe_copy(call!(g; params...))
-(g::GreenSlice)(ω; params...) = copy(call!(g, ω; params...))
+(g::GreenSlice)(ω; params...) = copy(call!(g, ω; ω_internal = ω, params...))
 
 call!(g::G, ω; params...) where {T,G<:Union{GreenFunction{T},GreenSlice{T}}} =
     call!(g, real_or_complex_promote(T, ω); params...)
