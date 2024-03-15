@@ -247,7 +247,7 @@ apply_shift(shifts, r, i) = r - shifts[i]
 # apply AbstractEigenSolver
 #region
 
-function apply(solver::AbstractEigenSolver, h::AbstractHamiltonian, ::Type{S}, mapping, transform) where {T<:Real,S<:SVector{<:Any,T}}
+function apply(solver::AbstractEigenSolver, h::AbstractHamiltonian, ::Type{S}, mapping, transform, forcehermitian) where {T<:Real,S<:SVector{<:Any,T}}
     h´ = minimal_callsafe_copy(h)
     # Some solvers (e.g. ES.LinearAlgebra) only accept certain matrix types
     # so this mat´ could be an alias of the call! output, or an unaliased conversion
@@ -258,7 +258,7 @@ function apply(solver::AbstractEigenSolver, h::AbstractHamiltonian, ::Type{S}, m
         mat´ === mat || copy!(mat´, mat)
         # mat´ could be dense, while mat is sparse, so if not egal, we copy
         # the solver always receives the type of matrix mat´ declared by ES.input_matrix
-        eigen = solver(mat´)
+        eigen = forcehermitian ? solver(Hermitian(mat´)) : solver(mat´)
         apply_transform!(eigen, transform)
         return eigen
     end
@@ -269,11 +269,11 @@ function apply(solver::AbstractEigenSolver, h::AbstractHamiltonian, ::Type{S}, m
     return asolver
 end
 
-function apply(solver::AbstractEigenSolver, hf::Function, ::Type{S}, mapping, transform) where {T<:Real,S<:SVector{<:Any,T}}
+function apply(solver::AbstractEigenSolver, hf::Function, ::Type{S}, mapping, transform, forcehermitian) where {T<:Real,S<:SVector{<:Any,T}}
     function sfunc(φs)
         φs´ = apply_map(mapping, φs)    # can be a FrankenTuple, should be accepted by hf
         mat = hf(φs´)
-        eigen = solver(mat)
+        eigen = forcehermitian ? solver(Hermitian(mat)) : solver(mat)
         apply_transform!(eigen, transform)
         return eigen
     end
@@ -281,7 +281,7 @@ function apply(solver::AbstractEigenSolver, hf::Function, ::Type{S}, mapping, tr
     return asolver
 end
 
-apply(solver::AbstractEigenSolver, h, S, mapping, transform) =
+apply(solver::AbstractEigenSolver, h, S, mapping, transform, forcehermitian) =
     argerror("Encountered an unexpected type as argument to an eigensolver. Are your mesh vertices real?")
 
 apply_transform!(eigen, ::Missing) = eigen

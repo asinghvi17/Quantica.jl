@@ -1166,18 +1166,21 @@ julia> spectrum(h, (0,0); solver = ES.ShiftInvert(ES.ArnoldiMethod(nev = 4), 0.0
 EigenSolvers
 
 """
-    spectrum(h::AbstractHamiltonian, ϕs; solver = EigenSolvers.LinearAlgebra(), transform = missing, params...)
+    spectrum(h::AbstractHamiltonian, ϕs; solver = EigenSolvers.LinearAlgebra(), transform = missing, forcehermitian = true, params...)
 
 Compute the `Spectrum` of the Bloch matrix `h(ϕs; params...)` using the specified
-eigensolver, with `transform` applied to the resulting eigenenergies, if not `missing`.
-Eigenpairs are sorted by the real part of their energy. See `EigenSolvers` for available
-solvers and their options.
+eigensolver, with `transform` applied to the resulting eigenenergies, if not `missing`. If
+`forcehermitian` is `true`, the Hermitian part of the Bloch matrix is taken before
+diagonalization, which guarantees orthogonal eigenvectors. For type stability, eigenvalues
+and eigenvectors are always returned as complex numbers, even if their imaginary part is
+zero. Eigenpairs are sorted by the real part of their energy. See `EigenSolvers` for
+available solvers and their options.
 
     spectrum(h::AbstractHamiltonian; kw...)
 
 For a 0D `h`, equivalent to `spectrum(h, (); kw...)`
 
-    spectrum(m::AbstractMatrix; solver = EigenSolvers.LinearAlgebra()], transform = missing)
+    spectrum(m::AbstractMatrix; solver = EigenSolvers.LinearAlgebra(), transform = missing)
 
 Compute the `Spectrum` of matrix `m` using `solver` and `transform`.
 
@@ -1273,6 +1276,7 @@ subdiv(-π, π, 49)`.
 - `solver`: eigensolver to use for each diagonalization (see `Eigensolvers`). Default: `ES.LinearAlgebra()`
 - `mapping`: a function of the form `(x, y, ...) -> ϕs` or `(x, y, ...) -> ftuple(ϕs...; params...)` that translates points `(x, y, ...)` in the mesh to Bloch phases `ϕs` or phase+parameter FrankenTuples `ftuple(ϕs...; params...)`. See also linecuts below. Default: `identity`
 - `transform`: function to apply to each eigenvalue after diagonalization. Default: `identity`
+- `forcehermitian`: if true, the Hermitian part of the matrices is taken before diagonalization. Default: `true`
 - `degtol::Real`: maximum distance between to nearby eigenvalue so that they are classified as degenerate. Default: `sqrt(eps)`
 - `split::Bool`: whether to split bands into disconnected subbands. Default: `true`
 - `projectors::Bool`: whether to compute interpolating subspaces in each simplex (for use as GreenSolver). Default: `true`
@@ -1696,7 +1700,7 @@ Compute a `ρ::DensityMatrix` at thermal equilibrium on sites encoded in `gs`. T
 matrix for given system parameters `params`, and for a given chemical potential `mu` and
 temperature `kBT` is obtained by calling `ρ(mu = 0, kBT = 0; params...)`. The algorithm used is
 specialized for the GreenSolver used, if available. In this case, `opts` are options for
-said algorithm.
+said algorithm (see Algorithms and keywords below).
 
     densitymatrix(gs::GreenSlice, (ωmin, ωmax); opts..., quadgk_opts...)
     densitymatrix(gs::GreenSlice, (ωpoints...); opts..., quadgk_opts...)
@@ -1728,9 +1732,9 @@ The generic integration algorithm allows for the following `opts` (see also `jos
 - `post`: a function to apply to the result of the integration. Default: `identity`.
 - `slope`: the integration contour is a sawtooth path connecting `(ωmin, ωmax)`, or more generally `ωpoints`, which are usually real numbers encompasing the system's bandwidth. Between each pair of points the path increases and then decreases linearly with the given `slope`. Default: `1.0`.
 
-Currently, the following GreenSolvers implement dedicated densitymatrix algorithms:
+Currently, the following GreenSolvers implement dedicated densitymatrix algorithms (see `greenfunction`):
 
-- `GS.Spectrum`: based on summation occupation-weigthed eigenvectors. No `opts`.
+- `GS.Spectrum`: based on summation occupation-weighted eigenvectors. No `opts`.
 - `GS.KPM`: based on the Chebyshev expansion of the Fermi function. Currently only works for zero temperature and only supports `nothing` contacts (see `attach`). No `opts`.
 
 # Example

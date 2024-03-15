@@ -133,15 +133,17 @@ sanitize_supercell(::Val{L}, v) where {L} =
 
 ############################################################################################
 # Eigen sanitizers
+#   The eigenvalues and eigenvectors are sorted, and the eigenvalues are converted to complex
+#   numbers if they are not already.
 #region
 
 sanitize_eigen(ε::AbstractVector, Ψs::AbstractVector{<:AbstractVector}) =
     sanitize_eigen(ε, hcat(Ψs...))
-sanitize_eigen(ε, Ψ) = Eigen(sorteigs!(sanitize_eigen(ε), sanitize_eigen(Ψ))...)
+sanitize_eigen(ε, Ψ) = Eigen(sort_and_ortho_eigs!(sanitize_eigen(ε), sanitize_eigen(Ψ))...)
 sanitize_eigen(x::AbstractArray{<:Real}) = complex.(x)
 sanitize_eigen(x::AbstractArray{<:Complex}) = x
 
-function sorteigs!(ϵ::AbstractVector, ψ::AbstractMatrix)
+function sort_and_ortho_eigs!(ϵ::AbstractVector, ψ::AbstractMatrix)
     p = Vector{Int}(undef, length(ϵ))
     p´ = similar(p)
     sortperm!(p, ϵ, by = real, alg = Base.DEFAULT_UNSTABLE)
@@ -149,5 +151,8 @@ function sorteigs!(ϵ::AbstractVector, ψ::AbstractMatrix)
     Base.permutecols!!(ψ, copy!(p´, p))
     return ϵ, ψ
 end
+
+
+
 
 #endregion

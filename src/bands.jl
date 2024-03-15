@@ -2,20 +2,24 @@
 # spectrum
 #region
 
-function spectrum(h::AbstractHamiltonian{T}, φs; solver = ES.LinearAlgebra(), transform = missing, kw...) where {T}
+function spectrum(h::AbstractHamiltonian{T}, φs; solver = ES.LinearAlgebra(), transform = missing, forcehermitian = true, kw...) where {T}
     os = blockstructure(h)
     mapping = (φ...) -> ftuple(φ...; kw...)
     φs´ = sanitize_SVector(T, φs)
     S = typeof(φs´)
-    asolver = apply(solver, h, S, mapping, transform)
+    asolver = apply(solver, h, S, mapping, transform, forcehermitian)
     eigen = asolver(φs´)
     return Spectrum(eigen, os)
 end
 
+spectrum(m::AbstractMatrix; solver = EigenSolvers.LinearAlgebra(), transform = missing) =
+    apply_transform!(solver(m), transform)
+
+
 spectrum(h::AbstractHamiltonian{T,<:Any,0}; kw...) where {T} =
     spectrum(h, SVector{0,T}(); kw...)
 
-function spectrum(b::Bandstructure, φs;)
+function spectrum(b::Bandstructure, φs)
     os = blockstructure(b)
     solver = first(solvers(b))
     eigen = solver(φs)
@@ -71,9 +75,9 @@ bands(h::AbstractHamiltonian{<:Any,<:Any,L}; kw...) where {L} =
 default_band_ticks(::Val{L}) where {L} = ntuple(Returns(subdiv(-π, π, 49)), Val(L))
 
 function bands(h::AbstractHamiltonian, mesh::Mesh{S};
-         solver = ES.LinearAlgebra(), transform = missing, mapping = missing, kw...) where {S<:SVector}
+         solver = ES.LinearAlgebra(), transform = missing, mapping = missing, forcehermitian = true, kw...) where {S<:SVector}
     mapping´ = sanitize_mapping(mapping, h)
-    solvers = eigensolvers_thread_pool(solver, h, S, mapping´, transform)
+    solvers = eigensolvers_thread_pool(solver, h, S, mapping´, transform, forcehermitian)
     hf = apply_map(mapping´, h, S)
     ss = subbands(hf, solvers, mesh; kw...)
     os = blockstructure(h)
@@ -81,18 +85,18 @@ function bands(h::AbstractHamiltonian, mesh::Mesh{S};
 end
 
 function bands(h::Function, mesh::Mesh{S};
-         solver = ES.LinearAlgebra(), transform = missing, mapping = missing, kw...) where {S<:SVector}
+         solver = ES.LinearAlgebra(), transform = missing, mapping = missing, forcehermitian = true, kw...) where {S<:SVector}
     mapping´ = sanitize_mapping(mapping, h)
-    solvers = eigensolvers_thread_pool(solver, h, S, mapping´, transform)
+    solvers = eigensolvers_thread_pool(solver, h, S, mapping´, transform, forcehermitian)
     hf = apply_map(mapping´, h, S)
     ss = subbands(hf, solvers, mesh; kw...)
     return ss
 end
 
-function eigensolvers_thread_pool(solver, h, S, mapping, transform)
+function eigensolvers_thread_pool(solver, h, S, mapping, transform, forcehermitian)
     # if h::Function we cannot be sure it is thread-safe
     nsolvers = ES.is_thread_safe(solver) && h isa AbstractHamiltonian ? Threads.nthreads() : 1
-    solvers = [apply(solver, h, S, mapping, transform) for _ in 1:nsolvers]
+    solvers = [apply(solver, h, S, mapping, transform, forcehermitian) for _ in 1:nsolvers]
     return solvers
 end
 
